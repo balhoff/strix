@@ -49,13 +49,17 @@ pub struct ReasonArgs {
     #[arg(short, long, value_name = "PATH", allow_hyphen_values = true)]
     pub output: PathBuf,
 
-    /// Separate ontology input (supported RDF file or directory)
+    /// Separate ontology input (.owx, .ofn, .owl, .rdf, .ttl, .nt file or directory)
     #[arg(short = 'O', long, value_name = "PATH", allow_hyphen_values = true)]
     pub ontology: Option<PathBuf>,
 
     /// Merge schema extracted from data
     #[arg(long)]
     pub extract_ontology: bool,
+
+    /// Ignore annotation-property schema axioms during ontology lowering
+    #[arg(long)]
+    pub ignore_annotation_axioms: bool,
 
     /// Emit inferred-only triples or the full closure
     #[arg(long, value_enum, default_value_t = EmitMode::Inferred)]
@@ -190,6 +194,7 @@ mod tests {
                 assert_eq!(args.output, PathBuf::from("out.nt"));
                 assert_eq!(args.ontology, None);
                 assert!(!args.extract_ontology);
+                assert!(!args.ignore_annotation_axioms);
                 assert_eq!(args.emit, EmitMode::Inferred);
                 assert_eq!(args.output_format, OutputFormat::NTriples);
                 assert_eq!(args.work_dir, None);

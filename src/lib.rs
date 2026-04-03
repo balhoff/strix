@@ -23,7 +23,9 @@ use engine::materialize;
 use error::{AppError, Result};
 use output::report::{InputReport, ReasoningReport, RulesReport, RunReport, StratumReport};
 use output::{write_ntriples, write_run_report};
-use owl::{RawSchema, ingest_data_triple, ingest_ontology_triple};
+use owl::{
+    ExtractedSchema, RawSchema, ingest_data_triple, load_extracted_schema, load_ontology_path,
+};
 use rdf::visit_path;
 use store::FactStore;
 
@@ -73,8 +75,10 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
     let mut dictionary = Dictionary::new();
     let _well_known = WellKnown::register(&mut dictionary);
     let mut schema = RawSchema::default();
+    let mut extracted_schema = ExtractedSchema::default();
     let mut store = FactStore::default();
     let extract_schema = args.extract_ontology || args.ontology.is_none();
+    let ignore_annotation_axioms = args.ignore_annotation_axioms;
     let mut input_triples = 0usize;
 
     logger.info("Ingesting data");
@@ -86,7 +90,7 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
                 triple,
                 extract_schema,
                 &mut dictionary,
-                &mut schema,
+                &mut extracted_schema,
                 &mut store,
             );
             Ok(())
@@ -95,10 +99,12 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
 
     if let Some(ontology_path) = &args.ontology {
         logger.info("Loading ontology");
-        visit_path(ontology_path, |triple| {
-            ingest_ontology_triple(triple, &mut dictionary, &mut schema);
-            Ok(())
-        })?;
+        load_ontology_path(ontology_path, &mut dictionary, &mut schema, ignore_annotation_axioms)?;
+    }
+
+    if extract_schema {
+        logger.info("Normalizing extracted schema");
+        load_extracted_schema(&extracted_schema, &mut dictionary, &mut schema, ignore_annotation_axioms)?;
     }
     let ingest_time_ms = ingest_timer.elapsed_ms();
 

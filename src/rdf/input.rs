@@ -116,10 +116,7 @@ fn detect_format(path: &Path) -> Option<RdfFormat> {
     if extension.eq_ignore_ascii_case("trig") {
         return Some(RdfFormat::TriG);
     }
-    if extension.eq_ignore_ascii_case("rdf")
-        || extension.eq_ignore_ascii_case("xml")
-        || extension.eq_ignore_ascii_case("owl")
-    {
+    if extension.eq_ignore_ascii_case("rdf") || extension.eq_ignore_ascii_case("owl") {
         return Some(RdfFormat::RdfXml);
     }
     if extension.eq_ignore_ascii_case("jsonld") || extension.eq_ignore_ascii_case("json") {
@@ -170,13 +167,10 @@ mod tests {
             Some(RdfFormat::RdfXml)
         );
         assert_eq!(
-            detect_format(Path::new("data.xml")),
-            Some(RdfFormat::RdfXml)
-        );
-        assert_eq!(
             detect_format(Path::new("data.owl")),
             Some(RdfFormat::RdfXml)
         );
+        assert_eq!(detect_format(Path::new("data.xml")), None);
         assert_eq!(
             detect_format(Path::new("data.jsonld")),
             Some(RdfFormat::JsonLd)

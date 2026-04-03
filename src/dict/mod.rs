@@ -31,8 +31,8 @@ impl Dictionary {
         identifier
     }
 
-    pub fn encode_iri(&mut self, iri: impl Into<String>) -> TermId {
-        self.encode(Term::Iri(iri.into()))
+    pub fn encode_iri(&mut self, iri: &str) -> TermId {
+        self.encode(Term::Iri(iri.to_owned()))
     }
 
     pub fn decode(&self, identifier: TermId) -> Option<&Term> {

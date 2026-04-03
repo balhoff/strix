@@ -1,15 +1,14 @@
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
 #[test]
 fn reasons_with_separate_ontology() {
-    let temp_dir = TestDir::new("separate-ontology");
-    let data = temp_dir.path.join("data.nt");
-    let ontology = temp_dir.path.join("ontology.nt");
-    let output = temp_dir.path.join("inferred.nt");
-    let report = temp_dir.path.join("report.json");
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data = temp_dir.path().join("data.nt");
+    let ontology = temp_dir.path().join("ontology.nt");
+    let output = temp_dir.path().join("inferred.nt");
+    let report = temp_dir.path().join("report.json");
 
     write(
         &data,
@@ -56,11 +55,237 @@ fn reasons_with_separate_ontology() {
 }
 
 #[test]
+fn reasons_with_rdf_xml_ontology() {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data = temp_dir.path().join("data.nt");
+    let ontology = temp_dir.path().join("ontology.owl");
+    let output = temp_dir.path().join("inferred.nt");
+
+    write(
+        &data,
+        "\
+<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Person> .
+",
+    );
+    write(
+        &ontology,
+        "\
+<?xml version=\"1.0\"?>
+<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"
+         xmlns:rdfs=\"http://www.w3.org/2000/01/rdf-schema#\"
+         xmlns:owl=\"http://www.w3.org/2002/07/owl#\">
+  <owl:Class rdf:about=\"http://example.com/Agent\" />
+  <owl:Class rdf:about=\"http://example.com/Person\">
+    <rdfs:subClassOf rdf:resource=\"http://example.com/Agent\" />
+  </owl:Class>
+</rdf:RDF>
+",
+    );
+
+    strix::run([
+        "strix",
+        "reason",
+        data.to_str().expect("data path should be UTF-8"),
+        "--ontology",
+        ontology.to_str().expect("ontology path should be UTF-8"),
+        "--output",
+        output.to_str().expect("output path should be UTF-8"),
+    ])
+    .expect("reasoning run should succeed");
+
+    let inferred = fs::read_to_string(&output).expect("output should exist");
+    assert!(inferred.contains("<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Agent> ."));
+}
+
+#[test]
+fn reasons_with_turtle_ontology() {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data = temp_dir.path().join("data.nt");
+    let ontology = temp_dir.path().join("ontology.ttl");
+    let output = temp_dir.path().join("inferred.nt");
+
+    write(
+        &data,
+        "\
+<http://example.com/alice> <http://example.com/knows> <http://example.com/bob> .
+",
+    );
+    write(
+        &ontology,
+        "\
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+
+<http://example.com/relatedTo> a owl:ObjectProperty .
+<http://example.com/knows> a owl:ObjectProperty ;
+    rdfs:subPropertyOf <http://example.com/relatedTo> .
+",
+    );
+
+    strix::run([
+        "strix",
+        "reason",
+        data.to_str().expect("data path should be UTF-8"),
+        "--ontology",
+        ontology.to_str().expect("ontology path should be UTF-8"),
+        "--output",
+        output.to_str().expect("output path should be UTF-8"),
+    ])
+    .expect("reasoning run should succeed");
+
+    let inferred = fs::read_to_string(&output).expect("output should exist");
+    assert!(inferred.contains(
+        "<http://example.com/alice> <http://example.com/relatedTo> <http://example.com/bob> ."
+    ));
+}
+
+#[test]
+fn reasons_with_owl_xml_ontology() {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data = temp_dir.path().join("data.nt");
+    let ontology = temp_dir.path().join("ontology.owx");
+    let output = temp_dir.path().join("inferred.nt");
+
+    write(
+        &data,
+        "\
+<http://example.com/alice> <http://example.com/knows> <http://example.com/bob> .
+<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Person> .
+",
+    );
+    write(
+        &ontology,
+        "\
+<?xml version=\"1.0\"?>
+<Ontology xmlns=\"http://www.w3.org/2002/07/owl#\"
+     xml:base=\"http://example.com/ontology\"
+     xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"
+     xmlns:xml=\"http://www.w3.org/XML/1998/namespace\"
+     xmlns:xsd=\"http://www.w3.org/2001/XMLSchema#\"
+     xmlns:rdfs=\"http://www.w3.org/2000/01/rdf-schema#\"
+     ontologyIRI=\"http://example.com/ontology\">
+    <Declaration>
+        <Class IRI=\"http://example.com/Person\"/>
+    </Declaration>
+    <Declaration>
+        <Class IRI=\"http://example.com/Agent\"/>
+    </Declaration>
+    <Declaration>
+        <Class IRI=\"http://example.com/SocialEntity\"/>
+    </Declaration>
+    <Declaration>
+        <ObjectProperty IRI=\"http://example.com/knows\"/>
+    </Declaration>
+    <Declaration>
+        <ObjectProperty IRI=\"http://example.com/relatedTo\"/>
+    </Declaration>
+    <SubClassOf>
+        <Class IRI=\"http://example.com/Person\"/>
+        <Class IRI=\"http://example.com/Agent\"/>
+    </SubClassOf>
+    <SubObjectPropertyOf>
+        <ObjectProperty IRI=\"http://example.com/knows\"/>
+        <ObjectProperty IRI=\"http://example.com/relatedTo\"/>
+    </SubObjectPropertyOf>
+    <ObjectPropertyDomain>
+        <ObjectProperty IRI=\"http://example.com/relatedTo\"/>
+        <Class IRI=\"http://example.com/SocialEntity\"/>
+    </ObjectPropertyDomain>
+    <ObjectPropertyRange>
+        <ObjectProperty IRI=\"http://example.com/relatedTo\"/>
+        <Class IRI=\"http://example.com/SocialEntity\"/>
+    </ObjectPropertyRange>
+</Ontology>
+",
+    );
+
+    strix::run([
+        "strix",
+        "reason",
+        data.to_str().expect("data path should be UTF-8"),
+        "--ontology",
+        ontology.to_str().expect("ontology path should be UTF-8"),
+        "--output",
+        output.to_str().expect("output path should be UTF-8"),
+    ])
+    .expect("reasoning run should succeed");
+
+    let inferred = fs::read_to_string(&output).expect("output should exist");
+    assert!(inferred.contains(
+        "<http://example.com/alice> <http://example.com/relatedTo> <http://example.com/bob> ."
+    ));
+    assert!(inferred.contains("<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Agent> ."));
+    assert!(inferred.contains("<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/SocialEntity> ."));
+    assert!(inferred.contains("<http://example.com/bob> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/SocialEntity> ."));
+}
+
+#[test]
+fn reasons_with_functional_syntax_ontology() {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data = temp_dir.path().join("data.nt");
+    let ontology = temp_dir.path().join("ontology.ofn");
+    let output = temp_dir.path().join("inferred.nt");
+
+    write(
+        &data,
+        "\
+<http://example.com/alice> <http://example.com/knows> <http://example.com/bob> .
+<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Person> .
+",
+    );
+    write(
+        &ontology,
+        "\
+Prefix(:=<http://example.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Prefix(rdf:=<http://www.w3.org/1999/02/22-rdf-syntax-ns#>)
+Prefix(xml:=<http://www.w3.org/XML/1998/namespace>)
+Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)
+Prefix(rdfs:=<http://www.w3.org/2000/01/rdf-schema#>)
+
+Ontology(<http://example.com/ontology>
+
+Declaration(Class(:Person))
+Declaration(Class(:Agent))
+Declaration(Class(:SocialEntity))
+Declaration(ObjectProperty(:knows))
+Declaration(ObjectProperty(:relatedTo))
+
+SubClassOf(:Person :Agent)
+SubObjectPropertyOf(:knows :relatedTo)
+ObjectPropertyDomain(:relatedTo :SocialEntity)
+ObjectPropertyRange(:relatedTo :SocialEntity)
+
+)
+",
+    );
+
+    strix::run([
+        "strix",
+        "reason",
+        data.to_str().expect("data path should be UTF-8"),
+        "--ontology",
+        ontology.to_str().expect("ontology path should be UTF-8"),
+        "--output",
+        output.to_str().expect("output path should be UTF-8"),
+    ])
+    .expect("reasoning run should succeed");
+
+    let inferred = fs::read_to_string(&output).expect("output should exist");
+    assert!(inferred.contains(
+        "<http://example.com/alice> <http://example.com/relatedTo> <http://example.com/bob> ."
+    ));
+    assert!(inferred.contains("<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Agent> ."));
+    assert!(inferred.contains("<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/SocialEntity> ."));
+    assert!(inferred.contains("<http://example.com/bob> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/SocialEntity> ."));
+}
+
+#[test]
 fn extracts_schema_from_data_and_can_emit_closure() {
-    let temp_dir = TestDir::new("extract-ontology");
-    let schema = temp_dir.path.join("schema.nt");
-    let facts = temp_dir.path.join("facts.nt");
-    let output = temp_dir.path.join("closure.nt");
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let schema = temp_dir.path().join("schema.nt");
+    let facts = temp_dir.path().join("facts.nt");
+    let output = temp_dir.path().join("closure.nt");
 
     write(
         &schema,
@@ -98,10 +323,10 @@ fn extracts_schema_from_data_and_can_emit_closure() {
 
 #[test]
 fn preserves_non_schema_rdfs_assertions_in_data() {
-    let temp_dir = TestDir::new("preserve-rdfs-assertions");
-    let data = temp_dir.path.join("data.nt");
-    let ontology = temp_dir.path.join("ontology.nt");
-    let output = temp_dir.path.join("closure.nt");
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data = temp_dir.path().join("data.nt");
+    let ontology = temp_dir.path().join("ontology.nt");
+    let output = temp_dir.path().join("closure.nt");
 
     write(
         &data,
@@ -137,12 +362,55 @@ fn preserves_non_schema_rdfs_assertions_in_data() {
 }
 
 #[test]
-fn rejects_blank_node_schema_terms_from_ontology() {
-    let temp_dir = TestDir::new("reject-blank-node-schema");
-    let data = temp_dir.path.join("data.nt");
-    let ontology = temp_dir.path.join("ontology.nt");
-    let output = temp_dir.path.join("inferred.nt");
-    let report = temp_dir.path.join("report.json");
+fn ignores_annotation_property_axioms_in_strict_mode() {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data = temp_dir.path().join("data.nt");
+    let ontology = temp_dir.path().join("ontology.nt");
+    let output = temp_dir.path().join("closure.nt");
+
+    write(
+        &data,
+        "\
+<http://example.com/alice> <http://www.w3.org/2000/01/rdf-schema#label> \"Alice\" .
+",
+    );
+    write(
+        &ontology,
+        "\
+<http://www.w3.org/2000/01/rdf-schema#label> <http://www.w3.org/2000/01/rdf-schema#domain> <http://example.com/LabeledThing> .
+",
+    );
+
+    strix::run([
+        "strix",
+        "reason",
+        data.to_str().expect("data path should be UTF-8"),
+        "--ontology",
+        ontology.to_str().expect("ontology path should be UTF-8"),
+        "--ignore-annotation-axioms",
+        "--output",
+        output.to_str().expect("output path should be UTF-8"),
+        "--emit",
+        "closure",
+    ])
+    .expect("reasoning run should succeed");
+
+    let closure = fs::read_to_string(&output).expect("closure output should exist");
+    assert!(closure.contains(
+        "<http://example.com/alice> <http://www.w3.org/2000/01/rdf-schema#label> \"Alice\" ."
+    ));
+    assert!(!closure.contains(
+        "<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/LabeledThing> ."
+    ));
+}
+
+#[test]
+fn reports_and_ignores_incomplete_ontology_residue() {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data = temp_dir.path().join("data.nt");
+    let ontology = temp_dir.path().join("ontology.nt");
+    let output = temp_dir.path().join("inferred.nt");
+    let report = temp_dir.path().join("report.json");
 
     write(
         &data,
@@ -174,15 +442,16 @@ _:anon <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://example.com/Per
     assert!(!inferred.contains("<http://example.com/Person>"));
 
     let report_json = fs::read_to_string(&report).expect("report should exist");
-    assert!(report_json.contains("blank-node subclass axioms are deferred beyond Phase 1"));
+    assert!(report_json.contains("left unlowered horned-owl residue"));
+    assert!(report_json.contains("ignored"));
 }
 
 #[test]
 fn namespaces_blank_nodes_across_directory_inputs() {
-    let temp_dir = TestDir::new("blank-node-directory");
-    let data_dir = temp_dir.path.join("data");
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data_dir = temp_dir.path().join("data");
     let nested_dir = data_dir.join("nested");
-    let output = temp_dir.path.join("closure.nt");
+    let output = temp_dir.path().join("closure.nt");
 
     fs::create_dir_all(&nested_dir).expect("data dir should be created");
     write(
@@ -216,11 +485,11 @@ _:b0 <http://example.com/p> <http://example.com/o2> .
 
 #[test]
 fn loads_all_supported_rdf_formats_and_compressions_from_nested_directories() {
-    let temp_dir = TestDir::new("all-rdf-formats");
-    let data_dir = temp_dir.path.join("data");
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data_dir = temp_dir.path().join("data");
     let nested = data_dir.join("nested");
     let deep = nested.join("deep");
-    let output = temp_dir.path.join("closure.nt");
+    let output = temp_dir.path().join("closure.nt");
 
     fs::create_dir_all(&deep).expect("nested data directories should be created");
 
@@ -325,9 +594,9 @@ fn loads_all_supported_rdf_formats_and_compressions_from_nested_directories() {
 
 #[test]
 fn escapes_control_characters_on_export() {
-    let temp_dir = TestDir::new("escape-controls");
-    let data = temp_dir.path.join("data.nt");
-    let output = temp_dir.path.join("closure.nt");
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data = temp_dir.path().join("data.nt");
+    let output = temp_dir.path().join("closure.nt");
 
     write(
         &data,
@@ -356,11 +625,11 @@ fn escapes_control_characters_on_export() {
 
 #[test]
 fn report_counts_only_abox_inferences() {
-    let temp_dir = TestDir::new("abox-inference-report");
-    let data = temp_dir.path.join("data.nt");
-    let ontology = temp_dir.path.join("ontology.nt");
-    let output = temp_dir.path.join("inferred.nt");
-    let report = temp_dir.path.join("report.json");
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data = temp_dir.path().join("data.nt");
+    let ontology = temp_dir.path().join("ontology.nt");
+    let output = temp_dir.path().join("inferred.nt");
+    let report = temp_dir.path().join("report.json");
 
     write(
         &data,
@@ -400,28 +669,6 @@ fn report_counts_only_abox_inferences() {
         .next()
         .expect("schema stratum should have a closing brace");
     assert!(schema_section.contains("\"inferred\": 0"));
-}
-
-struct TestDir {
-    path: PathBuf,
-}
-
-impl TestDir {
-    fn new(label: &str) -> Self {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after unix epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("strix-{label}-{unique}"));
-        fs::create_dir_all(&path).expect("test temp dir should be created");
-        Self { path }
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
 }
 
 fn write(path: &Path, content: &str) {
