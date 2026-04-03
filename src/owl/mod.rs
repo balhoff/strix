@@ -3,6 +3,7 @@ mod parse;
 use std::collections::BTreeSet;
 
 use crate::dict::{Dictionary, TermId};
+use crate::error::Result;
 use crate::rdf::{Term, Triple};
 use crate::store::FactStore;
 
@@ -61,21 +62,22 @@ pub fn ingest_data_triple(
     dictionary: &mut Dictionary,
     extracted_schema: &mut ExtractedSchema,
     store: &mut FactStore,
-) {
+) -> Result<()> {
     if extract_schema && should_extract_schema_axiom(&triple) {
         extracted_schema.push(triple);
-        return;
+        return Ok(());
     }
 
     let subject = dictionary.encode(triple.subject);
     let object = dictionary.encode(triple.object);
     if triple.predicate == RDF_TYPE_IRI {
-        store.insert_asserted_type(subject, object);
-        return;
+        store.insert_asserted_type(subject, object)?;
+        return Ok(());
     }
 
     let predicate = dictionary.encode(Term::Iri(triple.predicate));
-    store.insert_asserted_property(subject, predicate, object);
+    store.insert_asserted_property(subject, predicate, object)?;
+    Ok(())
 }
 
 fn should_extract_schema_axiom(triple: &Triple) -> bool {

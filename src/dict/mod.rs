@@ -1,18 +1,20 @@
-use std::collections::HashMap;
+mod decoding;
+mod encoding;
+mod well_known;
 
-use crate::owl::{
-    OWL_CLASS_IRI, OWL_DATATYPE_PROPERTY_IRI, OWL_OBJECT_PROPERTY_IRI, RDF_PROPERTY_IRI,
-    RDF_TYPE_IRI, RDFS_CLASS_IRI, RDFS_DOMAIN_IRI, RDFS_RANGE_IRI, RDFS_SUBCLASS_OF_IRI,
-    RDFS_SUBPROPERTY_OF_IRI,
-};
+pub use well_known::WellKnown;
+
 use crate::rdf::Term;
+
+use decoding::ReverseMap;
+use encoding::ForwardMap;
 
 pub type TermId = u64;
 
 #[derive(Debug, Default)]
 pub struct Dictionary {
-    forward: HashMap<Term, TermId>,
-    reverse: Vec<Term>,
+    forward: ForwardMap,
+    reverse: ReverseMap,
 }
 
 impl Dictionary {
@@ -21,25 +23,22 @@ impl Dictionary {
     }
 
     pub fn encode(&mut self, term: Term) -> TermId {
-        if let Some(identifier) = self.forward.get(&term) {
-            return *identifier;
+        if let Some(id) = self.forward.get(&term) {
+            return id;
         }
 
-        let identifier = self.reverse.len() as TermId + 1;
+        let id = self.reverse.len() as TermId + 1;
         self.reverse.push(term.clone());
-        self.forward.insert(term, identifier);
-        identifier
+        self.forward.insert(term, id);
+        id
     }
 
     pub fn encode_iri(&mut self, iri: &str) -> TermId {
         self.encode(Term::Iri(iri.to_owned()))
     }
 
-    pub fn decode(&self, identifier: TermId) -> Option<&Term> {
-        if identifier == 0 {
-            return None;
-        }
-        self.reverse.get(identifier as usize - 1)
+    pub fn decode(&self, id: TermId) -> Option<&Term> {
+        self.reverse.get(id)
     }
 
     pub fn len(&self) -> usize {
@@ -48,36 +47,5 @@ impl Dictionary {
 
     pub fn is_empty(&self) -> bool {
         self.reverse.is_empty()
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct WellKnown {
-    pub rdf_type: TermId,
-    pub rdf_property: TermId,
-    pub rdfs_class: TermId,
-    pub rdfs_subclass_of: TermId,
-    pub rdfs_subproperty_of: TermId,
-    pub rdfs_domain: TermId,
-    pub rdfs_range: TermId,
-    pub owl_class: TermId,
-    pub owl_object_property: TermId,
-    pub owl_datatype_property: TermId,
-}
-
-impl WellKnown {
-    pub fn register(dictionary: &mut Dictionary) -> Self {
-        Self {
-            rdf_type: dictionary.encode_iri(RDF_TYPE_IRI),
-            rdf_property: dictionary.encode_iri(RDF_PROPERTY_IRI),
-            rdfs_class: dictionary.encode_iri(RDFS_CLASS_IRI),
-            rdfs_subclass_of: dictionary.encode_iri(RDFS_SUBCLASS_OF_IRI),
-            rdfs_subproperty_of: dictionary.encode_iri(RDFS_SUBPROPERTY_OF_IRI),
-            rdfs_domain: dictionary.encode_iri(RDFS_DOMAIN_IRI),
-            rdfs_range: dictionary.encode_iri(RDFS_RANGE_IRI),
-            owl_class: dictionary.encode_iri(OWL_CLASS_IRI),
-            owl_object_property: dictionary.encode_iri(OWL_OBJECT_PROPERTY_IRI),
-            owl_datatype_property: dictionary.encode_iri(OWL_DATATYPE_PROPERTY_IRI),
-        }
     }
 }

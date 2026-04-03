@@ -13,7 +13,9 @@ use oxrdfio::RdfFormat as OxRdfFormat;
 use walkdir::WalkDir;
 
 use crate::dict::{Dictionary, TermId};
-use crate::error::{AppError, Result, ResultExt};
+use anyhow::Context;
+
+use crate::error::Result;
 use crate::rdf::Triple;
 
 use super::{ExtractedSchema, RawSchema};
@@ -96,19 +98,13 @@ pub fn load_extracted_schema(
 
 fn discover_ontology_inputs(path: &Path) -> Result<Vec<OntologyInput>> {
     if !path.exists() {
-        return Err(AppError::new(format!(
-            "path does not exist: {}",
-            path.display()
-        )));
+        return Err(anyhow::anyhow!("path does not exist: {}", path.display()));
     }
 
     let mut inputs = Vec::new();
     if path.is_file() {
         let input = classify_input(path).ok_or_else(|| {
-            AppError::new(format!(
-                "unsupported ontology input format: {}",
-                path.display()
-            ))
+            anyhow::anyhow!("unsupported ontology input format: {}", path.display())
         })?;
         inputs.push(input);
     } else if path.is_dir() {
@@ -121,18 +117,18 @@ fn discover_ontology_inputs(path: &Path) -> Result<Vec<OntologyInput>> {
             }
         }
     } else {
-        return Err(AppError::new(format!(
+        return Err(anyhow::anyhow!(
             "path is neither a file nor a directory: {}",
             path.display()
-        )));
+        ));
     }
 
     inputs.sort_by(|left, right| left.path.cmp(&right.path));
     if inputs.is_empty() {
-        return Err(AppError::new(format!(
+        return Err(anyhow::anyhow!(
             "no supported ontology files found under {}",
             path.display()
-        )));
+        ));
     }
 
     Ok(inputs)
@@ -197,8 +193,13 @@ fn parse_input(input: &OntologyInput) -> Result<ParsedOntology> {
             let mut reader = BufReader::new(Cursor::new(bytes));
             let config = ParserConfiguration::default();
             let (ontology, _) =
-                owx::reader::read::<RcStr, SetOntology<RcStr>, _>(&mut reader, config).context(
-                    format!("failed to parse OWL/XML ontology {}", input.path.display()),
+                owx::reader::read::<RcStr, SetOntology<RcStr>, _>(&mut reader, config).map_err(
+                    |e| {
+                        anyhow::anyhow!(
+                            "failed to parse OWL/XML ontology {}: {e:?}",
+                            input.path.display()
+                        )
+                    },
                 )?;
             Ok(ParsedOntology {
                 source: input.path.display().to_string(),
@@ -210,10 +211,12 @@ fn parse_input(input: &OntologyInput) -> Result<ParsedOntology> {
             let reader = BufReader::new(Cursor::new(bytes));
             let config = ParserConfiguration::default();
             let (ontology, _) = ofn::reader::read::<RcStr, SetOntology<RcStr>, _>(reader, config)
-                .context(format!(
-                "failed to parse OWL Functional Syntax ontology {}",
-                input.path.display()
-            ))?;
+                .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to parse OWL Functional Syntax ontology {}: {e:?}",
+                    input.path.display()
+                )
+            })?;
             Ok(ParsedOntology {
                 source: input.path.display().to_string(),
                 ontology,
@@ -241,7 +244,7 @@ fn parse_rdf_bytes(
     config.rdf.lax = true;
 
     let (ontology, incomplete) = rdf::reader::read(&mut reader, config)
-        .context(format!("failed to parse RDF ontology {source}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to parse RDF ontology {source}: {e:?}"))?;
     let incomplete = if incomplete.is_complete() {
         None
     } else {
@@ -288,7 +291,12 @@ fn absorb_parsed_ontology(
     schema: &mut RawSchema,
     ignore_annotation_axioms: bool,
 ) {
-    absorb_ontology(&parsed.ontology, dictionary, schema, ignore_annotation_axioms);
+    absorb_ontology(
+        &parsed.ontology,
+        dictionary,
+        schema,
+        ignore_annotation_axioms,
+    );
 
     if let Some(incomplete) = parsed.incomplete {
         record_incomplete_parse(&parsed.source, &incomplete, schema);
@@ -348,7 +356,9 @@ fn absorb_ontology(
         match &annotated.component {
             Component::OntologyID(_) | Component::DocIRI(_) | Component::OntologyAnnotation(_) => {}
             Component::DeclareClass(axiom) => {
-                schema.classes.insert(dictionary.encode_iri(axiom.0.as_ref()));
+                schema
+                    .classes
+                    .insert(dictionary.encode_iri(axiom.0.as_ref()));
             }
             Component::DeclareAnnotationProperty(axiom) => {
                 if !ignore_annotation_axioms {

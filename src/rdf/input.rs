@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
-use crate::error::{AppError, Result, ResultExt};
+use anyhow::Context;
+
+use crate::error::Result;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RdfFormat {
@@ -32,17 +34,13 @@ pub struct RdfInput {
 
 pub fn discover_inputs(path: &Path) -> Result<Vec<RdfInput>> {
     if !path.exists() {
-        return Err(AppError::new(format!(
-            "path does not exist: {}",
-            path.display()
-        )));
+        return Err(anyhow::anyhow!("path does not exist: {}", path.display()));
     }
 
     let mut inputs = Vec::new();
     if path.is_file() {
-        let input = classify_file(path).ok_or_else(|| {
-            AppError::new(format!("unsupported RDF input format: {}", path.display()))
-        })?;
+        let input = classify_file(path)
+            .ok_or_else(|| anyhow::anyhow!("unsupported RDF input format: {}", path.display()))?;
         inputs.push(input);
     } else if path.is_dir() {
         for entry in WalkDir::new(path).follow_links(true) {
@@ -54,18 +52,18 @@ pub fn discover_inputs(path: &Path) -> Result<Vec<RdfInput>> {
             }
         }
     } else {
-        return Err(AppError::new(format!(
+        return Err(anyhow::anyhow!(
             "path is neither a file nor a directory: {}",
             path.display()
-        )));
+        ));
     }
 
     inputs.sort_by(|left, right| left.path.cmp(&right.path));
     if inputs.is_empty() {
-        return Err(AppError::new(format!(
+        return Err(anyhow::anyhow!(
             "no supported RDF files found under {}",
             path.display()
-        )));
+        ));
     }
 
     Ok(inputs)

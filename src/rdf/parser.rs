@@ -10,7 +10,9 @@ use oxrdfio::{
 };
 use url::Url;
 
-use crate::error::{Result, ResultExt};
+use anyhow::Context;
+
+use crate::error::Result;
 use crate::rdf::{Literal, Term, Triple};
 
 use super::input::{Compression, RdfFormat, RdfInput, discover_inputs};
@@ -82,10 +84,10 @@ fn file_iri(path: &Path) -> Result<String> {
     Url::from_file_path(&canonical_path)
         .map(|url| url.to_string())
         .map_err(|()| {
-            crate::error::AppError::new(format!(
+            anyhow::anyhow!(
                 "failed to derive a file IRI from {}",
                 canonical_path.display()
-            ))
+            )
         })
 }
 

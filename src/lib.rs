@@ -14,13 +14,14 @@ use std::fs;
 use std::time::Instant;
 
 use clap::{Parser, error::ErrorKind};
+use tracing_subscriber::EnvFilter;
 
 use bench::StageTimer;
 use cli::{Cli, Commands, OutputFormat, ReasonArgs};
 use compile::compile_schema;
 use dict::{Dictionary, WellKnown};
 use engine::materialize;
-use error::{AppError, Result};
+use error::Result;
 use output::report::{InputReport, ReasoningReport, RulesReport, RunReport, StratumReport};
 use output::{write_ntriples, write_run_report};
 use owl::{
@@ -61,27 +62,47 @@ where
 }
 
 fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Result<()> {
-    let logger = Logger::new(verbose, quiet);
+    let filter = match (quiet, verbose) {
+        (true, _) => EnvFilter::new("error"),
+        (_, 0) => EnvFilter::new("info"),
+        (_, 1) => EnvFilter::new("debug"),
+        (_, _) => EnvFilter::new("trace"),
+    };
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .try_init();
+
     let wall_clock = Instant::now();
 
     match args.output_format {
         OutputFormat::NTriples => {}
     }
 
-    if let Some(work_dir) = &args.work_dir {
-        fs::create_dir_all(work_dir)?;
-    }
+    let temp_dir = if args.work_dir.is_none() {
+        Some(tempfile::TempDir::new()?)
+    } else {
+        None
+    };
+    let work_dir = match &args.work_dir {
+        Some(dir) => {
+            fs::create_dir_all(dir)?;
+            dir.clone()
+        }
+        None => temp_dir.as_ref().unwrap().path().to_path_buf(),
+    };
 
     let mut dictionary = Dictionary::new();
     let _well_known = WellKnown::register(&mut dictionary);
     let mut schema = RawSchema::default();
     let mut extracted_schema = ExtractedSchema::default();
-    let mut store = FactStore::default();
+    let mut store = FactStore::new(&work_dir, args.memory_budget.bytes() as usize)?;
     let extract_schema = args.extract_ontology || args.ontology.is_none();
     let ignore_annotation_axioms = args.ignore_annotation_axioms;
     let mut input_triples = 0usize;
 
-    logger.info("Ingesting data");
+    tracing::info!("Ingesting data");
     let ingest_timer = StageTimer::start();
     for data_path in &args.data {
         visit_path(data_path, |triple| {
@@ -92,39 +113,48 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
                 &mut dictionary,
                 &mut extracted_schema,
                 &mut store,
-            );
-            Ok(())
+            )
         })?;
     }
 
     if let Some(ontology_path) = &args.ontology {
-        logger.info("Loading ontology");
-        load_ontology_path(ontology_path, &mut dictionary, &mut schema, ignore_annotation_axioms)?;
+        tracing::info!("Loading ontology");
+        load_ontology_path(
+            ontology_path,
+            &mut dictionary,
+            &mut schema,
+            ignore_annotation_axioms,
+        )?;
     }
 
     if extract_schema {
-        logger.info("Normalizing extracted schema");
-        load_extracted_schema(&extracted_schema, &mut dictionary, &mut schema, ignore_annotation_axioms)?;
+        tracing::info!("Normalizing extracted schema");
+        load_extracted_schema(
+            &extracted_schema,
+            &mut dictionary,
+            &mut schema,
+            ignore_annotation_axioms,
+        )?;
     }
     let ingest_time_ms = ingest_timer.elapsed_ms();
 
-    logger.info("Compiling schema");
+    tracing::info!("Compiling schema");
     let compile_timer = StageTimer::start();
     let compiled_schema = compile_schema(&schema);
     let schema_compile_time_ms = compile_timer.elapsed_ms();
 
-    logger.info("Materializing RDFS closure");
+    tracing::info!("Materializing RDFS closure");
     let reasoning_timer = StageTimer::start();
     let reasoning_stats = materialize(&mut store, &compiled_schema, args.max_iterations)?;
     let reasoning_time_ms = reasoning_timer.elapsed_ms();
 
-    logger.info("Writing output");
+    tracing::info!("Writing output");
     let export_timer = StageTimer::start();
-    let written_triples = write_ntriples(&args.output, args.emit, &dictionary, &store)?;
+    let written_triples = write_ntriples(&args.output, args.emit, &dictionary, &mut store)?;
     let export_time_ms = export_timer.elapsed_ms();
 
     if let Some(report_path) = &args.report {
-        logger.info("Writing run report");
+        tracing::info!("Writing run report");
         let report = RunReport {
             version: 1,
             input: InputReport {
@@ -135,12 +165,7 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
                 memory_budget_bytes: args.memory_budget.bytes(),
             },
             rules: RulesReport {
-                supported: compiled_schema
-                    .rule_set
-                    .rules
-                    .iter()
-                    .map(|rule| rule.id.to_string())
-                    .collect(),
+                supported: compiled_schema.rule_set.rule_ids(),
                 unsupported_encountered: schema.unsupported_constructs(),
             },
             reasoning: ReasoningReport {
@@ -174,39 +199,7 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
         write_run_report(report_path, &report)?;
     }
 
-    logger.debug(&format!(
-        "Completed run with {} inferred ABox triples",
-        reasoning_stats.total_inferred()
-    ));
+    tracing::debug!(inferred = reasoning_stats.total_inferred(), "Completed run");
 
     Ok(())
-}
-
-struct Logger {
-    verbose: u8,
-    quiet: bool,
-}
-
-impl Logger {
-    fn new(verbose: u8, quiet: bool) -> Self {
-        Self { verbose, quiet }
-    }
-
-    fn info(&self, message: &str) {
-        if !self.quiet {
-            eprintln!("{message}");
-        }
-    }
-
-    fn debug(&self, message: &str) {
-        if !self.quiet && self.verbose > 0 {
-            eprintln!("{message}");
-        }
-    }
-}
-
-impl From<clap::Error> for AppError {
-    fn from(error: clap::Error) -> Self {
-        AppError::new(error.to_string())
-    }
 }

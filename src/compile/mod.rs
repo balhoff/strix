@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::dict::TermId;
 use crate::owl::RawSchema;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct CompiledSchema {
     pub superclasses: BTreeMap<TermId, Vec<TermId>>,
     pub superproperties: BTreeMap<TermId, Vec<TermId>>,

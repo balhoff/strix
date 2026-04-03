@@ -1,77 +1,114 @@
-use std::collections::BTreeSet;
+pub mod delta;
+pub mod merge;
+pub mod relation;
+pub mod segment;
+
+use std::path::{Path, PathBuf};
 
 use crate::dict::TermId;
+use crate::error::Result;
 
-#[derive(Debug, Default)]
+use relation::{BinaryRelation, TernaryRelation};
+
+/// Predicate-partitioned fact store with disk-backed sorted-run segments.
+///
+/// ABox facts are split into `type_assertions` (instance, class) and
+/// `property_assertions` (subject, predicate, object), each with
+/// separate asserted and derived segment sets.
+#[derive(Debug)]
 pub struct FactStore {
-    asserted_types: BTreeSet<(TermId, TermId)>,
-    derived_types: BTreeSet<(TermId, TermId)>,
-    asserted_properties: BTreeSet<(TermId, TermId, TermId)>,
-    derived_properties: BTreeSet<(TermId, TermId, TermId)>,
+    asserted_types: BinaryRelation,
+    derived_types: BinaryRelation,
+    asserted_properties: TernaryRelation,
+    derived_properties: TernaryRelation,
+    _work_dir: PathBuf,
+}
+
+/// Default budget per relation buffer (1/8 of total budget, shared across 4 relations).
+fn relation_budget(total_budget: usize) -> usize {
+    total_budget / 4
 }
 
 impl FactStore {
-    pub fn insert_asserted_type(&mut self, instance: TermId, class: TermId) {
-        self.asserted_types.insert((instance, class));
+    pub fn new(work_dir: &Path, memory_budget: usize) -> Result<Self> {
+        let budget = relation_budget(memory_budget);
+        std::fs::create_dir_all(work_dir)?;
+        Ok(Self {
+            asserted_types: BinaryRelation::new(work_dir, "asserted-types", budget),
+            derived_types: BinaryRelation::new(work_dir, "derived-types", budget),
+            asserted_properties: TernaryRelation::new(work_dir, "asserted-props", budget),
+            derived_properties: TernaryRelation::new(work_dir, "derived-props", budget),
+            _work_dir: work_dir.to_path_buf(),
+        })
     }
 
-    pub fn insert_asserted_property(&mut self, subject: TermId, predicate: TermId, object: TermId) {
-        self.asserted_properties
-            .insert((subject, predicate, object));
+    // --- Insertion ---
+
+    pub fn insert_asserted_type(&mut self, instance: TermId, class: TermId) -> Result<()> {
+        self.asserted_types.push((instance, class))
     }
 
-    pub fn insert_derived_type(&mut self, instance: TermId, class: TermId) -> bool {
-        if self.asserted_types.contains(&(instance, class))
-            || self.derived_types.contains(&(instance, class))
-        {
-            return false;
-        }
-        self.derived_types.insert((instance, class))
-    }
-
-    pub fn insert_derived_property(
+    pub fn insert_asserted_property(
         &mut self,
         subject: TermId,
         predicate: TermId,
         object: TermId,
-    ) -> bool {
-        if self
-            .asserted_properties
-            .contains(&(subject, predicate, object))
-            || self
-                .derived_properties
-                .contains(&(subject, predicate, object))
-        {
-            return false;
-        }
-        self.derived_properties.insert((subject, predicate, object))
+    ) -> Result<()> {
+        self.asserted_properties.push((subject, predicate, object))
     }
 
-    pub fn asserted_types(&self) -> impl Iterator<Item = (TermId, TermId)> + '_ {
-        self.asserted_types.iter().copied()
+    // --- Derived facts (for engine) ---
+
+    pub fn derived_types_mut(&mut self) -> &mut BinaryRelation {
+        &mut self.derived_types
     }
 
-    pub fn asserted_properties(&self) -> impl Iterator<Item = (TermId, TermId, TermId)> + '_ {
-        self.asserted_properties.iter().copied()
+    pub fn derived_properties_mut(&mut self) -> &mut TernaryRelation {
+        &mut self.derived_properties
     }
 
-    pub fn derived_types(&self) -> impl Iterator<Item = (TermId, TermId)> + '_ {
-        self.derived_types.iter().copied()
+    // --- Scans ---
+
+    /// All asserted type facts, sorted and deduplicated.
+    pub fn asserted_types(&mut self) -> Result<Vec<(TermId, TermId)>> {
+        self.asserted_types.scan()
     }
 
-    pub fn derived_properties(&self) -> impl Iterator<Item = (TermId, TermId, TermId)> + '_ {
-        self.derived_properties.iter().copied()
+    /// All derived type facts, sorted and deduplicated.
+    pub fn derived_types(&mut self) -> Result<Vec<(TermId, TermId)>> {
+        self.derived_types.scan()
     }
 
-    pub fn closure_types(&self) -> impl Iterator<Item = (TermId, TermId)> + '_ {
-        self.asserted_types().chain(self.derived_types())
+    /// All asserted property facts, sorted and deduplicated.
+    pub fn asserted_properties(&mut self) -> Result<Vec<(TermId, TermId, TermId)>> {
+        self.asserted_properties.scan()
     }
 
-    pub fn closure_properties(&self) -> impl Iterator<Item = (TermId, TermId, TermId)> + '_ {
-        self.asserted_properties().chain(self.derived_properties())
+    /// All derived property facts, sorted and deduplicated.
+    pub fn derived_properties(&mut self) -> Result<Vec<(TermId, TermId, TermId)>> {
+        self.derived_properties.scan()
     }
 
-    pub fn inferred_count(&self) -> usize {
-        self.derived_types.len() + self.derived_properties.len()
+    /// Known view: asserted + derived types, sorted and deduplicated.
+    pub fn known_types(&mut self) -> Result<Vec<(TermId, TermId)>> {
+        let mut known = self.asserted_types.scan()?;
+        known.extend(self.derived_types.scan()?);
+        known.sort_unstable();
+        known.dedup();
+        Ok(known)
+    }
+
+    /// Known view: asserted + derived properties, sorted and deduplicated.
+    pub fn known_properties(&mut self) -> Result<Vec<(TermId, TermId, TermId)>> {
+        let mut known = self.asserted_properties.scan()?;
+        known.extend(self.derived_properties.scan()?);
+        known.sort_unstable();
+        known.dedup();
+        Ok(known)
+    }
+
+    /// Count of derived (inferred) facts.
+    pub fn inferred_count(&mut self) -> Result<usize> {
+        Ok(self.derived_types.scan()?.len() + self.derived_properties.scan()?.len())
     }
 }
