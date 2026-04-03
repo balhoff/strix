@@ -26,12 +26,12 @@ pub fn materialize(
     let mut delta_properties = store.asserted_properties().collect::<Vec<_>>();
 
     while !delta_types.is_empty() || !delta_properties.is_empty() {
-        if let Some(limit) = max_iterations {
-            if stats.iterations >= limit {
-                return Err(AppError::new(format!(
-                    "maximum iterations ({limit}) reached before fixpoint"
-                )));
-            }
+        if let Some(limit) = max_iterations
+            && stats.iterations >= limit
+        {
+            return Err(AppError::new(format!(
+                "maximum iterations ({limit}) reached before fixpoint"
+            )));
         }
 
         stats.iterations += 1;

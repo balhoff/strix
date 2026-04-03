@@ -74,7 +74,7 @@ impl RunReport {
             "\"memory_budget_bytes\":",
             self.input.memory_budget_bytes,
         );
-        output.push_str("\n");
+        output.push('\n');
         output.push_str(&format!("{}}},\n", indent(1)));
 
         output.push_str(&format!("{}\"rules\": {{\n", indent(1)));
@@ -86,7 +86,7 @@ impl RunReport {
             "\"unsupported_encountered\":",
             &self.rules.unsupported_encountered,
         );
-        output.push_str("\n");
+        output.push('\n');
         output.push_str(&format!("{}}},\n", indent(1)));
 
         output.push_str(&format!("{}\"reasoning\": {{\n", indent(1)));
@@ -100,7 +100,7 @@ impl RunReport {
             line(&mut output, 4, "\"inferred\":", stratum.inferred);
             output.push_str(",\n");
             line(&mut output, 4, "\"time_ms\":", stratum.time_ms);
-            output.push_str("\n");
+            output.push('\n');
             output.push_str(&format!(
                 "{}}}{}\n",
                 indent(3),
@@ -132,7 +132,7 @@ impl RunReport {
             "\"fixpoint_reached\":",
             self.reasoning.fixpoint_reached,
         );
-        output.push_str("\n");
+        output.push('\n');
         output.push_str(&format!("{}}},\n", indent(1)));
 
         output.push_str(&format!("{}\"peak_rss_bytes\": ", indent(1)));

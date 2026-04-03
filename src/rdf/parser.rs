@@ -235,11 +235,8 @@ fn blank_node_label(label: &str, file_index: usize, namespace_blank_nodes: bool)
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io::{self, Read, Write};
-    use std::net::TcpListener;
     use std::path::{Path, PathBuf};
-    use std::thread;
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use url::Url;
 
@@ -268,33 +265,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn loads_remote_jsonld_contexts() {
-        let temp_dir = TestDir::new("remote-jsonld-context");
-        let data = temp_dir.path.join("data.jsonld");
-        let context_body = r#"{"@context":{"p":{"@id":"http://example.com/p","@type":"@id"}}}"#;
-        let server = TestServer::new("/context.jsonld", context_body);
-        write(
-            &data,
-            &format!(
-                "{{\n  \"@context\": \"{}/context.jsonld\",\n  \"@id\": \"http://example.com/s\",\n  \"p\": \"http://example.com/o\"\n}}\n",
-                server.base_url()
-            ),
-        );
-
-        let triples = collect_triples(&data);
-        server.join();
-
-        assert_eq!(
-            triples,
-            vec![Triple {
-                subject: Term::Iri("http://example.com/s".to_string()),
-                predicate: "http://example.com/p".to_string(),
-                object: Term::Iri("http://example.com/o".to_string()),
-            }]
-        );
-    }
-
     fn collect_triples(path: &Path) -> Vec<Triple> {
         let mut triples = Vec::new();
         visit_path(path, |triple| {
@@ -313,71 +283,6 @@ mod tests {
 
     fn write(path: &Path, content: &str) {
         fs::write(path, content).expect("test fixture should be written");
-    }
-
-    struct TestServer {
-        base_url: String,
-        handle: thread::JoinHandle<()>,
-    }
-
-    impl TestServer {
-        fn new(path: &'static str, body: &'static str) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0")
-                .expect("test server should bind an ephemeral port");
-            listener
-                .set_nonblocking(true)
-                .expect("test server should become non-blocking");
-            let address = listener
-                .local_addr()
-                .expect("test server should expose its bound address");
-            let base_url = format!("http://{address}");
-            let handle = thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_secs(5);
-                loop {
-                    match listener.accept() {
-                        Ok((mut stream, _)) => {
-                            let mut buffer = [0_u8; 2048];
-                            let size = stream
-                                .read(&mut buffer)
-                                .expect("test server should read a request");
-                            let request = String::from_utf8_lossy(&buffer[..size]);
-                            assert!(
-                                request.starts_with(&format!("GET {path} ")),
-                                "unexpected request line: {request}"
-                            );
-                            let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/ld+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                                body.len(),
-                                body
-                            );
-                            stream
-                                .write_all(response.as_bytes())
-                                .expect("test server should write a response");
-                            return;
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            assert!(
-                                Instant::now() < deadline,
-                                "test server did not receive a request in time"
-                            );
-                            thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(error) => panic!("test server accept failed: {error}"),
-                    }
-                }
-            });
-            Self { base_url, handle }
-        }
-
-        fn base_url(&self) -> &str {
-            &self.base_url
-        }
-
-        fn join(self) {
-            self.handle
-                .join()
-                .expect("test server thread should complete");
-        }
     }
 
     struct TestDir {

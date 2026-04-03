@@ -45,6 +45,10 @@ impl Dictionary {
     pub fn len(&self) -> usize {
         self.reverse.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.reverse.is_empty()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
