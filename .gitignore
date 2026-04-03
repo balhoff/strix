@@ -1,1 +1,6 @@
 /local-notes/
+/test-input/
+
+# Added by cargo
+
+/target
