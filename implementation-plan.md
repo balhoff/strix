@@ -327,7 +327,7 @@ Every run produces a structured report:
 
 ```
 strix reason \
-  --data data.nt.gz \
+  data.nt.gz more-data/ \
   --ontology ontology.owl \
   --output inferred.nt \
   --work-dir ./work \
@@ -335,7 +335,7 @@ strix reason \
   --report run-report.json
 
 strix reason \
-  --data /path/to/rdf-directory/ \
+  /path/to/rdf-directory/ \
   --output inferred.nt \
   --emit closure \
   --report run-report.json
@@ -357,7 +357,7 @@ strix reason \
 The CLI below is the long-term target surface. For implementation, freeze a smaller stable subset in Phase 1 and add the deferred flags only when their backing behavior exists.
 
 **Required in Phase 1:**
-- `--data <path>` / `-d`: Input RDF dataset (file or directory, any supported format)
+- `<path>...`: Input RDF datasets (files or directories, any supported format; at least one required)
 - `--output <path>` / `-o`: Output file for inferred triples
 
 **Available in Phase 1:**

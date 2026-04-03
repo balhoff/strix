@@ -32,7 +32,6 @@ fn reasons_with_separate_ontology() {
     strix::run([
         "strix",
         "reason",
-        "--data",
         data.to_str().expect("data path should be UTF-8"),
         "--ontology",
         ontology.to_str().expect("ontology path should be UTF-8"),
@@ -59,14 +58,20 @@ fn reasons_with_separate_ontology() {
 #[test]
 fn extracts_schema_from_data_and_can_emit_closure() {
     let temp_dir = TestDir::new("extract-ontology");
-    let data = temp_dir.path.join("data.nt");
+    let schema = temp_dir.path.join("schema.nt");
+    let facts = temp_dir.path.join("facts.nt");
     let output = temp_dir.path.join("closure.nt");
 
     write(
-        &data,
+        &schema,
         "\
 <http://example.com/A> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://example.com/B> .
 <http://example.com/p> <http://www.w3.org/2000/01/rdf-schema#domain> <http://example.com/A> .
+",
+    );
+    write(
+        &facts,
+        "\
 <http://example.com/x> <http://example.com/p> <http://example.com/y> .
 ",
     );
@@ -74,8 +79,8 @@ fn extracts_schema_from_data_and_can_emit_closure() {
     strix::run([
         "strix",
         "reason",
-        "--data",
-        data.to_str().expect("data path should be UTF-8"),
+        schema.to_str().expect("schema path should be UTF-8"),
+        facts.to_str().expect("facts path should be UTF-8"),
         "--output",
         output.to_str().expect("output path should be UTF-8"),
         "--emit",
@@ -114,7 +119,6 @@ fn preserves_non_schema_rdfs_assertions_in_data() {
     strix::run([
         "strix",
         "reason",
-        "--data",
         data.to_str().expect("data path should be UTF-8"),
         "--ontology",
         ontology.to_str().expect("ontology path should be UTF-8"),
@@ -156,7 +160,6 @@ _:anon <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://example.com/Per
     strix::run([
         "strix",
         "reason",
-        "--data",
         data.to_str().expect("data path should be UTF-8"),
         "--ontology",
         ontology.to_str().expect("ontology path should be UTF-8"),
@@ -198,7 +201,6 @@ _:b0 <http://example.com/p> <http://example.com/o2> .
     strix::run([
         "strix",
         "reason",
-        "--data",
         data_dir.to_str().expect("data path should be UTF-8"),
         "--output",
         output.to_str().expect("output path should be UTF-8"),
@@ -282,7 +284,6 @@ fn loads_all_supported_rdf_formats_and_compressions_from_nested_directories() {
     strix::run([
         "strix",
         "reason",
-        "--data",
         data_dir.to_str().expect("data path should be UTF-8"),
         "--output",
         output.to_str().expect("output path should be UTF-8"),
@@ -338,7 +339,6 @@ fn escapes_control_characters_on_export() {
     strix::run([
         "strix",
         "reason",
-        "--data",
         data.to_str().expect("data path should be UTF-8"),
         "--output",
         output.to_str().expect("output path should be UTF-8"),
@@ -379,7 +379,6 @@ fn report_counts_only_abox_inferences() {
     strix::run([
         "strix",
         "reason",
-        "--data",
         data.to_str().expect("data path should be UTF-8"),
         "--ontology",
         ontology.to_str().expect("ontology path should be UTF-8"),

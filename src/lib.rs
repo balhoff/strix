@@ -9,11 +9,14 @@ pub mod owl;
 pub mod rdf;
 pub mod store;
 
+use std::ffi::OsString;
 use std::fs;
 use std::time::Instant;
 
+use clap::{Parser, error::ErrorKind};
+
 use bench::StageTimer;
-use cli::{Cli, Command, OutputFormat, ReasonArgs};
+use cli::{Cli, Commands, OutputFormat, ReasonArgs};
 use compile::compile_schema;
 use dict::{Dictionary, WellKnown};
 use engine::materialize;
@@ -27,9 +30,23 @@ use store::FactStore;
 pub fn run<I, S>(args: I) -> Result<()>
 where
     I: IntoIterator<Item = S>,
-    S: Into<String>,
+    S: Into<OsString> + Clone,
 {
-    let cli = Cli::parse(args)?;
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp
+                    | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                    | ErrorKind::DisplayVersion
+            ) =>
+        {
+            print!("{error}");
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
     let Cli {
         verbose,
         quiet,
@@ -37,11 +54,7 @@ where
         command,
     } = cli;
     match command {
-        Command::Help => {
-            print!("{}", Cli::usage());
-            Ok(())
-        }
-        Command::Reason(reason_args) => run_reason(verbose, quiet, benchmark, reason_args),
+        Commands::Reason(reason_args) => run_reason(verbose, quiet, benchmark, reason_args),
     }
 }
 
@@ -66,17 +79,19 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
 
     logger.info("Ingesting data");
     let ingest_timer = StageTimer::start();
-    visit_path(&args.data, |triple| {
-        input_triples += 1;
-        ingest_data_triple(
-            triple,
-            extract_schema,
-            &mut dictionary,
-            &mut schema,
-            &mut store,
-        );
-        Ok(())
-    })?;
+    for data_path in &args.data {
+        visit_path(data_path, |triple| {
+            input_triples += 1;
+            ingest_data_triple(
+                triple,
+                extract_schema,
+                &mut dictionary,
+                &mut schema,
+                &mut store,
+            );
+            Ok(())
+        })?;
+    }
 
     if let Some(ontology_path) = &args.ontology {
         logger.info("Loading ontology");
@@ -184,8 +199,8 @@ impl Logger {
     }
 }
 
-impl From<cli::CliError> for AppError {
-    fn from(error: cli::CliError) -> Self {
+impl From<clap::Error> for AppError {
+    fn from(error: clap::Error) -> Self {
         AppError::new(error.to_string())
     }
 }
