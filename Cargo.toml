@@ -4,5 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bzip2 = "0.6"
+flate2 = "1.1"
 oxrdf = "0.3"
 oxrdfio = "0.2"
+ureq = "2.12.1"
+url = "2.5.8"
+walkdir = "2.5"
+xz2 = "0.1"

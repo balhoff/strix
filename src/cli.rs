@@ -114,9 +114,9 @@ Global options:
   -h, --help         Show this help
 
 Reason options:
-  -d, --data <PATH>             Input RDF dataset (N-Triples file or directory)
+  -d, --data <PATH>             Input RDF dataset (supported RDF file or directory)
   -o, --output <PATH>           Output file for inferred triples
-  -O, --ontology <PATH>         Separate ontology file (N-Triples)
+  -O, --ontology <PATH>         Separate ontology input (supported RDF file or directory)
       --extract-ontology        Merge schema extracted from data
       --emit <MODE>             inferred (default) or closure
       --output-format <FORMAT>  ntriples (default)
