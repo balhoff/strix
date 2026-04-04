@@ -24,7 +24,8 @@ pub fn write_ntriples(
 
     match emit {
         EmitMode::Inferred => {
-            for (instance, class) in store.derived_types()? {
+            for result in store.derived_types_iter()? {
+                let (instance, class) = result?;
                 writeln!(
                     writer,
                     "{}",
@@ -32,7 +33,8 @@ pub fn write_ntriples(
                 )?;
                 written += 1;
             }
-            for (subject, predicate, object) in store.derived_properties()? {
+            for result in store.derived_properties_iter()? {
+                let (subject, predicate, object) = result?;
                 writeln!(
                     writer,
                     "{}",
@@ -42,7 +44,8 @@ pub fn write_ntriples(
             }
         }
         EmitMode::Closure => {
-            for (instance, class) in store.known_types()? {
+            for result in store.known_types_iter()? {
+                let (instance, class) = result?;
                 writeln!(
                     writer,
                     "{}",
@@ -50,7 +53,8 @@ pub fn write_ntriples(
                 )?;
                 written += 1;
             }
-            for (subject, predicate, object) in store.known_properties()? {
+            for result in store.known_properties_iter()? {
+                let (subject, predicate, object) = result?;
                 writeln!(
                     writer,
                     "{}",

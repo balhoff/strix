@@ -1,41 +1,36 @@
-use crate::dict::TermId;
+use crate::error::Result;
 
-/// Compute the set difference: candidates that are NOT in `known`.
-/// Both inputs must be sorted.
-pub fn difference_binary(
-    candidates: &[(TermId, TermId)],
-    known: &[(TermId, TermId)],
-) -> Vec<(TermId, TermId)> {
-    let mut result = Vec::new();
-    let mut ki = 0;
-    for &c in candidates {
-        while ki < known.len() && known[ki] < c {
-            ki += 1;
-        }
-        if ki >= known.len() || known[ki] != c {
-            result.push(c);
-        }
+/// Advance a fallible iterator, converting `io::Error` to `anyhow::Error`.
+fn next_ok<T>(iter: &mut impl Iterator<Item = std::io::Result<T>>) -> Result<Option<T>> {
+    match iter.next() {
+        Some(Ok(v)) => Ok(Some(v)),
+        Some(Err(e)) => Err(e.into()),
+        None => Ok(None),
     }
-    result
 }
 
-/// Compute the set difference for ternary tuples.
-/// Both inputs must be sorted.
-pub fn difference_ternary(
-    candidates: &[(TermId, TermId, TermId)],
-    known: &[(TermId, TermId, TermId)],
-) -> Vec<(TermId, TermId, TermId)> {
+/// Streaming set difference: candidates NOT in `known`.
+/// `candidates` must be sorted. `known` must yield sorted tuples.
+pub fn difference_streaming<T: Copy + Ord>(
+    candidates: &[T],
+    mut known: impl Iterator<Item = std::io::Result<T>>,
+) -> Result<Vec<T>> {
     let mut result = Vec::new();
-    let mut ki = 0;
+    let mut current_known: Option<T> = next_ok(&mut known)?;
+
     for &c in candidates {
-        while ki < known.len() && known[ki] < c {
-            ki += 1;
+        while let Some(k) = current_known {
+            if k >= c {
+                break;
+            }
+            current_known = next_ok(&mut known)?;
         }
-        if ki >= known.len() || known[ki] != c {
+        if current_known != Some(c) {
             result.push(c);
         }
     }
-    result
+
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -44,20 +39,25 @@ mod tests {
 
     #[test]
     fn binary_difference_removes_known() {
-        let candidates = vec![(1, 2), (3, 4), (5, 6)];
-        let known = vec![(1, 2), (5, 6), (7, 8)];
-        assert_eq!(difference_binary(&candidates, &known), vec![(3, 4)]);
+        let candidates = vec![(1u64, 2u64), (3, 4), (5, 6)];
+        let known = vec![(1u64, 2u64), (5, 6), (7, 8)];
+        let result = difference_streaming(&candidates, known.into_iter().map(Ok)).unwrap();
+        assert_eq!(result, vec![(3, 4)]);
     }
 
     #[test]
     fn ternary_difference_removes_known() {
-        let candidates = vec![(1, 2, 3), (4, 5, 6)];
-        let known = vec![(1, 2, 3)];
-        assert_eq!(difference_ternary(&candidates, &known), vec![(4, 5, 6)]);
+        let candidates = vec![(1u64, 2u64, 3u64), (4, 5, 6)];
+        let known = vec![(1u64, 2u64, 3u64)];
+        let result = difference_streaming(&candidates, known.into_iter().map(Ok)).unwrap();
+        assert_eq!(result, vec![(4, 5, 6)]);
     }
 
     #[test]
     fn empty_candidates_returns_empty() {
-        assert_eq!(difference_binary(&[], &[(1, 2)]), Vec::<(u64, u64)>::new());
+        let candidates: &[(u64, u64)] = &[];
+        let known: Vec<(u64, u64)> = vec![(1, 2)];
+        let result = difference_streaming(candidates, known.into_iter().map(Ok)).unwrap();
+        assert!(result.is_empty());
     }
 }

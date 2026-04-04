@@ -3,7 +3,7 @@ use rayon::slice::ParallelSliceMut;
 use crate::compile::CompiledSchema;
 use crate::error::Result;
 use crate::store::FactStore;
-use crate::store::delta::{difference_binary, difference_ternary};
+use crate::store::delta::difference_streaming;
 
 #[derive(Clone, Debug, Default)]
 pub struct ReasoningStats {
@@ -19,51 +19,73 @@ impl ReasoningStats {
     }
 }
 
+fn apply_type_rules(
+    instance: u64,
+    class: u64,
+    schema: &CompiledSchema,
+    candidate_types: &mut Vec<(u64, u64)>,
+) {
+    for &superclass in schema.superclasses_for(class) {
+        candidate_types.push((instance, superclass));
+    }
+}
+
+fn apply_property_rules(
+    subject: u64,
+    predicate: u64,
+    object: u64,
+    schema: &CompiledSchema,
+    candidate_types: &mut Vec<(u64, u64)>,
+    candidate_properties: &mut Vec<(u64, u64, u64)>,
+) {
+    for &superproperty in schema.superproperties_for(predicate) {
+        candidate_properties.push((subject, superproperty, object));
+    }
+    for &domain in schema.domains_for(predicate) {
+        candidate_types.push((subject, domain));
+    }
+    for &range in schema.ranges_for(predicate) {
+        candidate_types.push((object, range));
+    }
+}
+
 pub fn materialize(
     store: &mut FactStore,
     schema: &CompiledSchema,
     max_iterations: Option<usize>,
 ) -> Result<ReasoningStats> {
     let mut stats = ReasoningStats::default();
+    let mut candidate_types: Vec<(u64, u64)> = Vec::new();
+    let mut candidate_properties: Vec<(u64, u64, u64)> = Vec::new();
 
-    // Seed deltas from asserted facts
-    let mut delta_types = store.asserted_types()?;
-    let mut delta_properties = store.asserted_properties()?;
+    // Seed: stream asserted facts to generate initial candidates
+    for result in store.asserted_types_iter()? {
+        let (instance, class) = result?;
+        apply_type_rules(instance, class, schema, &mut candidate_types);
+    }
+    for result in store.asserted_properties_iter()? {
+        let (subject, predicate, object) = result?;
+        apply_property_rules(
+            subject,
+            predicate,
+            object,
+            schema,
+            &mut candidate_types,
+            &mut candidate_properties,
+        );
+    }
 
-    while !delta_types.is_empty() || !delta_properties.is_empty() {
+    loop {
+        if candidate_types.is_empty() && candidate_properties.is_empty() {
+            break;
+        }
+
         if let Some(limit) = max_iterations
             && stats.iterations >= limit
         {
             anyhow::bail!("maximum iterations ({limit}) reached before fixpoint");
         }
-
         stats.iterations += 1;
-        let mut candidate_types: Vec<(u64, u64)> = Vec::new();
-        let mut candidate_properties: Vec<(u64, u64, u64)> = Vec::new();
-
-        // Subclass propagation: for delta type(x, a), emit type(x, b) for all b in superclasses(a)
-        for &(instance, class) in &delta_types {
-            for &superclass in schema.superclasses_for(class) {
-                candidate_types.push((instance, superclass));
-            }
-        }
-
-        // Subproperty propagation: for delta prop(s, p, o), emit prop(s, q, o) for all q in superprops(p)
-        for &(subject, predicate, object) in &delta_properties {
-            for &superproperty in schema.superproperties_for(predicate) {
-                candidate_properties.push((subject, superproperty, object));
-            }
-
-            // Domain inference: for delta prop(s, p, o), emit type(s, c) for all c in domains(p)
-            for &domain in schema.domains_for(predicate) {
-                candidate_types.push((subject, domain));
-            }
-
-            // Range inference: for delta prop(s, p, o), emit type(o, c) for all c in ranges(p)
-            for &range in schema.ranges_for(predicate) {
-                candidate_types.push((object, range));
-            }
-        }
 
         // Sort, dedup candidates
         candidate_types.par_sort_unstable();
@@ -71,11 +93,10 @@ pub fn materialize(
         candidate_properties.par_sort_unstable();
         candidate_properties.dedup();
 
-        // Difference check against known view
-        let known_types = store.known_types()?;
-        let known_properties = store.known_properties()?;
-        let new_types = difference_binary(&candidate_types, &known_types);
-        let new_properties = difference_ternary(&candidate_properties, &known_properties);
+        // Difference check against known view (streaming)
+        let new_types = difference_streaming(&candidate_types, store.known_types_iter()?)?;
+        let new_properties =
+            difference_streaming(&candidate_properties, store.known_properties_iter()?)?;
 
         if new_types.is_empty() && new_properties.is_empty() {
             break;
@@ -94,8 +115,22 @@ pub fn materialize(
         stats.inferred_types += new_types.len();
         stats.inferred_properties += new_properties.len();
 
-        delta_types = new_types;
-        delta_properties = new_properties;
+        // Generate next iteration's candidates from new facts (delta)
+        candidate_types.clear();
+        candidate_properties.clear();
+        for &(instance, class) in &new_types {
+            apply_type_rules(instance, class, schema, &mut candidate_types);
+        }
+        for &(subject, predicate, object) in &new_properties {
+            apply_property_rules(
+                subject,
+                predicate,
+                object,
+                schema,
+                &mut candidate_types,
+                &mut candidate_properties,
+            );
+        }
     }
 
     stats.fixpoint_reached = true;

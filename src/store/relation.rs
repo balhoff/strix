@@ -5,9 +5,10 @@ use rayon::slice::ParallelSliceMut;
 use crate::dict::TermId;
 use crate::error::Result;
 
-use super::merge::merge_sorted_dedup;
+use super::merge::{MergeBinaryIter, MergeTernaryIter};
 use super::segment::{
-    Segment, read_binary_segment, read_ternary_segment, write_binary_segment, write_ternary_segment,
+    BinarySegmentIter, Segment, TernarySegmentIter, write_binary_segment,
+    write_binary_segment_streaming, write_ternary_segment, write_ternary_segment_streaming,
 };
 
 /// A disk-backed relation of `(TermId, TermId)` pairs with in-memory buffer.
@@ -54,38 +55,25 @@ impl BinaryRelation {
         Ok(())
     }
 
-    /// Return a sorted, deduplicated iterator over all tuples (segments + buffer).
-    pub fn scan(&mut self) -> Result<Vec<(TermId, TermId)>> {
-        self.flush()?;
-        let mut all = Vec::new();
-        for segment in &self.segments {
-            all.extend(read_binary_segment(&segment.path)?);
-        }
-        all.par_sort_unstable();
-        all.dedup();
-        Ok(all)
-    }
-
     /// Compact all segments into one, removing duplicates.
     pub fn compact(&mut self) -> Result<()> {
         self.flush()?;
         if self.segments.len() <= 1 {
             return Ok(());
         }
-        let mut streams: Vec<Vec<(TermId, TermId)>> = Vec::new();
+        let mut iters = Vec::with_capacity(self.segments.len());
         for segment in &self.segments {
-            streams.push(read_binary_segment(&segment.path)?);
+            iters.push(BinarySegmentIter::open(&segment.path)?);
         }
-        let merged = merge_sorted_dedup(streams);
-        // Remove old segment files
+        let merge = MergeBinaryIter::new(iters)?;
+        let path = self.next_segment_path();
+        let new_segment = write_binary_segment_streaming(&path, merge)?;
         for segment in &self.segments {
             let _ = std::fs::remove_file(&segment.path);
         }
         self.segments.clear();
-        if !merged.is_empty() {
-            let path = self.next_segment_path();
-            let segment = write_binary_segment(&path, &merged)?;
-            self.segments.push(segment);
+        if new_segment.len > 0 {
+            self.segments.push(new_segment);
         }
         Ok(())
     }
@@ -96,6 +84,16 @@ impl BinaryRelation {
 
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty() && self.buffer.is_empty()
+    }
+
+    /// Flush the buffer and return streaming readers for all segments.
+    pub fn segment_iters(&mut self) -> Result<Vec<BinarySegmentIter>> {
+        self.flush()?;
+        let mut iters = Vec::with_capacity(self.segments.len());
+        for segment in &self.segments {
+            iters.push(BinarySegmentIter::open(&segment.path)?);
+        }
+        Ok(iters)
     }
 
     fn buffer_bytes(&self) -> usize {
@@ -154,37 +152,25 @@ impl TernaryRelation {
         Ok(())
     }
 
-    /// Return a sorted, deduplicated iterator over all tuples (segments + buffer).
-    pub fn scan(&mut self) -> Result<Vec<(TermId, TermId, TermId)>> {
-        self.flush()?;
-        let mut all = Vec::new();
-        for segment in &self.segments {
-            all.extend(read_ternary_segment(&segment.path)?);
-        }
-        all.par_sort_unstable();
-        all.dedup();
-        Ok(all)
-    }
-
     /// Compact all segments into one, removing duplicates.
     pub fn compact(&mut self) -> Result<()> {
         self.flush()?;
         if self.segments.len() <= 1 {
             return Ok(());
         }
-        let mut streams: Vec<Vec<(TermId, TermId, TermId)>> = Vec::new();
+        let mut iters = Vec::with_capacity(self.segments.len());
         for segment in &self.segments {
-            streams.push(read_ternary_segment(&segment.path)?);
+            iters.push(TernarySegmentIter::open(&segment.path)?);
         }
-        let merged = merge_sorted_dedup_ternary(streams);
+        let merge = MergeTernaryIter::new(iters)?;
+        let path = self.next_segment_path();
+        let new_segment = write_ternary_segment_streaming(&path, merge)?;
         for segment in &self.segments {
             let _ = std::fs::remove_file(&segment.path);
         }
         self.segments.clear();
-        if !merged.is_empty() {
-            let path = self.next_segment_path();
-            let segment = write_ternary_segment(&path, &merged)?;
-            self.segments.push(segment);
+        if new_segment.len > 0 {
+            self.segments.push(new_segment);
         }
         Ok(())
     }
@@ -197,6 +183,16 @@ impl TernaryRelation {
         self.segments.is_empty() && self.buffer.is_empty()
     }
 
+    /// Flush the buffer and return streaming readers for all segments.
+    pub fn segment_iters(&mut self) -> Result<Vec<TernarySegmentIter>> {
+        self.flush()?;
+        let mut iters = Vec::with_capacity(self.segments.len());
+        for segment in &self.segments {
+            iters.push(TernarySegmentIter::open(&segment.path)?);
+        }
+        Ok(iters)
+    }
+
     fn buffer_bytes(&self) -> usize {
         self.buffer.len() * std::mem::size_of::<(TermId, TermId, TermId)>()
     }
@@ -207,35 +203,4 @@ impl TernaryRelation {
         self.work_dir
             .join(format!("{}-{:06}.seg", self.label, index))
     }
-}
-
-/// K-way merge + dedup for ternary tuples.
-fn merge_sorted_dedup_ternary(
-    streams: Vec<Vec<(TermId, TermId, TermId)>>,
-) -> Vec<(TermId, TermId, TermId)> {
-    use std::cmp::Reverse;
-    use std::collections::BinaryHeap;
-
-    type HeapEntry = Reverse<(TermId, TermId, TermId, usize, usize)>;
-    let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::new();
-
-    for (stream_idx, stream) in streams.iter().enumerate() {
-        if let Some(&(a, b, c)) = stream.first() {
-            heap.push(Reverse((a, b, c, stream_idx, 0)));
-        }
-    }
-
-    let mut result = Vec::new();
-    while let Some(Reverse((a, b, c, stream_idx, pos))) = heap.pop() {
-        if result.last() != Some(&(a, b, c)) {
-            result.push((a, b, c));
-        }
-        let next_pos = pos + 1;
-        if next_pos < streams[stream_idx].len() {
-            let (na, nb, nc) = streams[stream_idx][next_pos];
-            heap.push(Reverse((na, nb, nc, stream_idx, next_pos)));
-        }
-    }
-
-    result
 }

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::dict::TermId;
 use crate::error::Result;
 
+use merge::{MergeBinaryIter, MergeTernaryIter};
 use relation::{BinaryRelation, TernaryRelation};
 
 /// Predicate-partitioned fact store with disk-backed sorted-run segments.
@@ -24,7 +25,7 @@ pub struct FactStore {
     _work_dir: PathBuf,
 }
 
-/// Default budget per relation buffer (1/8 of total budget, shared across 4 relations).
+/// Default budget per relation buffer (1/4 of total budget).
 fn relation_budget(total_budget: usize) -> usize {
     total_budget / 4
 }
@@ -67,48 +68,43 @@ impl FactStore {
         &mut self.derived_properties
     }
 
-    // --- Scans ---
+    // --- Streaming scans ---
 
-    /// All asserted type facts, sorted and deduplicated.
-    pub fn asserted_types(&mut self) -> Result<Vec<(TermId, TermId)>> {
-        self.asserted_types.scan()
+    /// Streaming iterator over asserted types, sorted and deduplicated.
+    pub fn asserted_types_iter(&mut self) -> Result<MergeBinaryIter> {
+        let iters = self.asserted_types.segment_iters()?;
+        Ok(MergeBinaryIter::new(iters)?)
     }
 
-    /// All derived type facts, sorted and deduplicated.
-    pub fn derived_types(&mut self) -> Result<Vec<(TermId, TermId)>> {
-        self.derived_types.scan()
+    /// Streaming iterator over asserted properties, sorted and deduplicated.
+    pub fn asserted_properties_iter(&mut self) -> Result<MergeTernaryIter> {
+        let iters = self.asserted_properties.segment_iters()?;
+        Ok(MergeTernaryIter::new(iters)?)
     }
 
-    /// All asserted property facts, sorted and deduplicated.
-    pub fn asserted_properties(&mut self) -> Result<Vec<(TermId, TermId, TermId)>> {
-        self.asserted_properties.scan()
+    /// Streaming iterator over derived types, sorted and deduplicated.
+    pub fn derived_types_iter(&mut self) -> Result<MergeBinaryIter> {
+        let iters = self.derived_types.segment_iters()?;
+        Ok(MergeBinaryIter::new(iters)?)
     }
 
-    /// All derived property facts, sorted and deduplicated.
-    pub fn derived_properties(&mut self) -> Result<Vec<(TermId, TermId, TermId)>> {
-        self.derived_properties.scan()
+    /// Streaming iterator over derived properties, sorted and deduplicated.
+    pub fn derived_properties_iter(&mut self) -> Result<MergeTernaryIter> {
+        let iters = self.derived_properties.segment_iters()?;
+        Ok(MergeTernaryIter::new(iters)?)
     }
 
-    /// Known view: asserted + derived types, sorted and deduplicated.
-    pub fn known_types(&mut self) -> Result<Vec<(TermId, TermId)>> {
-        let mut known = self.asserted_types.scan()?;
-        known.extend(self.derived_types.scan()?);
-        known.sort_unstable();
-        known.dedup();
-        Ok(known)
+    /// Streaming iterator over known types (asserted + derived), sorted and deduplicated.
+    pub fn known_types_iter(&mut self) -> Result<MergeBinaryIter> {
+        let mut iters = self.asserted_types.segment_iters()?;
+        iters.extend(self.derived_types.segment_iters()?);
+        Ok(MergeBinaryIter::new(iters)?)
     }
 
-    /// Known view: asserted + derived properties, sorted and deduplicated.
-    pub fn known_properties(&mut self) -> Result<Vec<(TermId, TermId, TermId)>> {
-        let mut known = self.asserted_properties.scan()?;
-        known.extend(self.derived_properties.scan()?);
-        known.sort_unstable();
-        known.dedup();
-        Ok(known)
-    }
-
-    /// Count of derived (inferred) facts.
-    pub fn inferred_count(&mut self) -> Result<usize> {
-        Ok(self.derived_types.scan()?.len() + self.derived_properties.scan()?.len())
+    /// Streaming iterator over known properties (asserted + derived), sorted and deduplicated.
+    pub fn known_properties_iter(&mut self) -> Result<MergeTernaryIter> {
+        let mut iters = self.asserted_properties.segment_iters()?;
+        iters.extend(self.derived_properties.segment_iters()?);
+        Ok(MergeTernaryIter::new(iters)?)
     }
 }
