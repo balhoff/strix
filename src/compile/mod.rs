@@ -78,35 +78,31 @@ fn to_map(pairs: &BTreeSet<(TermId, TermId)>) -> BTreeMap<TermId, Vec<TermId>> {
 fn transitive_closure(
     seed: &BTreeSet<(TermId, TermId)>,
 ) -> (BTreeSet<(TermId, TermId)>, usize, usize) {
+    // Build adjacency list from seed edges
+    let mut successors: BTreeMap<TermId, Vec<TermId>> = BTreeMap::new();
+    for &(from, to) in seed {
+        successors.entry(from).or_default().push(to);
+    }
+
+    // For each source node, DFS to find all transitively reachable nodes
     let mut closure = seed.clone();
-    let mut iterations = 0usize;
-
-    loop {
-        let snapshot = closure.iter().copied().collect::<Vec<_>>();
-        let mut additions = Vec::new();
-
-        for (left, middle) in &snapshot {
-            for (candidate_middle, right) in &snapshot {
-                if middle == candidate_middle && !closure.contains(&(*left, *right)) {
-                    additions.push((*left, *right));
+    for (&start, direct) in &successors {
+        let mut stack = direct.clone();
+        let mut visited: BTreeSet<TermId> = stack.iter().copied().collect();
+        while let Some(node) = stack.pop() {
+            closure.insert((start, node));
+            if let Some(next) = successors.get(&node) {
+                for &s in next {
+                    if visited.insert(s) {
+                        stack.push(s);
+                    }
                 }
             }
-        }
-
-        if additions.is_empty() {
-            if !closure.is_empty() && iterations == 0 {
-                iterations = 1;
-            }
-            break;
-        }
-
-        iterations += 1;
-        for pair in additions {
-            closure.insert(pair);
         }
     }
 
     let inferred = closure.len().saturating_sub(seed.len());
+    let iterations = if seed.is_empty() { 0 } else { 1 };
     (closure, iterations, inferred)
 }
 
