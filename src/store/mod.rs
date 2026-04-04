@@ -22,25 +22,26 @@ pub struct FactStore {
     derived_types: BinaryRelation,
     asserted_properties: TernaryRelation,
     derived_properties: TernaryRelation,
-    _work_dir: PathBuf,
-}
-
-/// Default budget per relation buffer (1/4 of total budget).
-fn relation_budget(total_budget: usize) -> usize {
-    total_budget / 4
+    work_dir: PathBuf,
 }
 
 impl FactStore {
-    pub fn new(work_dir: &Path, memory_budget: usize) -> Result<Self> {
-        let budget = relation_budget(memory_budget);
+    /// Create a new fact store. `store_budget` is the memory budget for the
+    /// store's 4 relation buffers (split evenly among them).
+    pub fn new(work_dir: &Path, store_budget: usize) -> Result<Self> {
+        let budget = store_budget / 4;
         std::fs::create_dir_all(work_dir)?;
         Ok(Self {
             asserted_types: BinaryRelation::new(work_dir, "asserted-types", budget),
             derived_types: BinaryRelation::new(work_dir, "derived-types", budget),
             asserted_properties: TernaryRelation::new(work_dir, "asserted-props", budget),
             derived_properties: TernaryRelation::new(work_dir, "derived-props", budget),
-            _work_dir: work_dir.to_path_buf(),
+            work_dir: work_dir.to_path_buf(),
         })
+    }
+
+    pub fn work_dir(&self) -> &Path {
+        &self.work_dir
     }
 
     // --- Insertion ---

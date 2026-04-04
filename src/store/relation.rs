@@ -86,6 +86,15 @@ impl BinaryRelation {
         self.segments.is_empty() && self.buffer.is_empty()
     }
 
+    /// Remove all data: clear buffer and delete all segment files.
+    pub fn clear(&mut self) {
+        self.buffer.clear();
+        for segment in &self.segments {
+            let _ = std::fs::remove_file(&segment.path);
+        }
+        self.segments.clear();
+    }
+
     /// Flush the buffer and return streaming readers for all segments.
     pub fn segment_iters(&mut self) -> Result<Vec<BinarySegmentIter>> {
         self.flush()?;
@@ -181,6 +190,15 @@ impl TernaryRelation {
 
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty() && self.buffer.is_empty()
+    }
+
+    /// Remove all data: clear buffer and delete all segment files.
+    pub fn clear(&mut self) {
+        self.buffer.clear();
+        for segment in &self.segments {
+            let _ = std::fs::remove_file(&segment.path);
+        }
+        self.segments.clear();
     }
 
     /// Flush the buffer and return streaming readers for all segments.

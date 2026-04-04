@@ -97,7 +97,10 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
     let _well_known = WellKnown::register(&mut dictionary);
     let mut schema = RawSchema::default();
     let mut extracted_schema = ExtractedSchema::default();
-    let mut store = FactStore::new(&work_dir, args.memory_budget.bytes() as usize)?;
+    let total_budget = args.memory_budget.bytes() as usize;
+    let store_budget = total_budget / 2;
+    let engine_budget = total_budget / 2;
+    let mut store = FactStore::new(&work_dir, store_budget)?;
     let extract_schema = args.extract_ontology || args.ontology.is_none();
     let ignore_annotation_axioms = args.ignore_annotation_axioms;
     let mut input_triples = 0usize;
@@ -145,7 +148,12 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
 
     tracing::info!("Materializing RDFS closure");
     let reasoning_timer = StageTimer::start();
-    let reasoning_stats = materialize(&mut store, &compiled_schema, args.max_iterations)?;
+    let reasoning_stats = materialize(
+        &mut store,
+        &compiled_schema,
+        args.max_iterations,
+        engine_budget,
+    )?;
     let reasoning_time_ms = reasoning_timer.elapsed_ms();
 
     tracing::info!("Writing output");
@@ -162,7 +170,7 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
                 tbox_axioms: schema.total_axioms(),
                 dictionary_terms: dictionary.len(),
                 output_triples: written_triples,
-                memory_budget_bytes: args.memory_budget.bytes(),
+                memory_budget_bytes: total_budget as u64,
             },
             rules: RulesReport {
                 supported: compiled_schema.rule_set.rule_ids(),
