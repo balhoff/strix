@@ -79,6 +79,12 @@ pub enum SchemaPattern {
     DomainInference,
     /// property(?s, ?p, ?o) -> type(?o, ?c) for ?c in ranges(?p)
     RangeInference,
+    /// property(?s, ?p, ?o) -> property(?o, ?q, ?s) for ?q in inverses(?p)
+    InverseProperty,
+    /// property(?s, ?p, ?o) -> property(?o, ?p, ?s) when symmetric(?p)
+    SymmetricProperty,
+    /// property(?x, ?p, ?y) ∧ property(?y, ?p, ?z) -> property(?x, ?p, ?z) when transitive(?p)
+    TransitiveProperty,
 }
 
 /// A compiled set of rules, grouped by stratum.
@@ -88,8 +94,8 @@ pub struct RuleSet {
 }
 
 impl RuleSet {
-    /// Construct the Phase 1 rule set: 4 schema-parameterized RDFS/OWL RL rules.
-    pub fn phase_one() -> Self {
+    /// Construct the rule set for all currently implemented rules.
+    pub fn build() -> Self {
         Self {
             rules: vec![
                 (
@@ -171,6 +177,78 @@ impl RuleSet {
                         },
                     },
                     EvalStrategy::SchemaParameterized(SchemaPattern::RangeInference),
+                ),
+                (
+                    Rule {
+                        id: "owl-inverse",
+                        family: RuleFamily::OwlRl,
+                        stratum: 1,
+                        body: vec![BodyAtom {
+                            relation: RelationId::PropertyAssertion,
+                            bindings: vec![
+                                Binding::Variable(0),
+                                Binding::Variable(1),
+                                Binding::Variable(2),
+                            ],
+                        }],
+                        head: HeadAtom {
+                            relation: RelationId::PropertyAssertion,
+                            bindings: vec![
+                                Binding::Variable(2),
+                                Binding::Variable(3),
+                                Binding::Variable(0),
+                            ],
+                        },
+                    },
+                    EvalStrategy::SchemaParameterized(SchemaPattern::InverseProperty),
+                ),
+                (
+                    Rule {
+                        id: "owl-symmetric",
+                        family: RuleFamily::OwlRl,
+                        stratum: 1,
+                        body: vec![BodyAtom {
+                            relation: RelationId::PropertyAssertion,
+                            bindings: vec![
+                                Binding::Variable(0),
+                                Binding::Variable(1),
+                                Binding::Variable(2),
+                            ],
+                        }],
+                        head: HeadAtom {
+                            relation: RelationId::PropertyAssertion,
+                            bindings: vec![
+                                Binding::Variable(2),
+                                Binding::Variable(1),
+                                Binding::Variable(0),
+                            ],
+                        },
+                    },
+                    EvalStrategy::SchemaParameterized(SchemaPattern::SymmetricProperty),
+                ),
+                (
+                    Rule {
+                        id: "owl-transitive",
+                        family: RuleFamily::OwlRl,
+                        stratum: 1,
+                        body: vec![BodyAtom {
+                            relation: RelationId::PropertyAssertion,
+                            bindings: vec![
+                                Binding::Variable(0),
+                                Binding::Variable(1),
+                                Binding::Variable(2),
+                            ],
+                        }],
+                        head: HeadAtom {
+                            relation: RelationId::PropertyAssertion,
+                            bindings: vec![
+                                Binding::Variable(0),
+                                Binding::Variable(1),
+                                Binding::Variable(3),
+                            ],
+                        },
+                    },
+                    EvalStrategy::SchemaParameterized(SchemaPattern::TransitiveProperty),
                 ),
             ],
         }

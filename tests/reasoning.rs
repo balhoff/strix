@@ -671,8 +671,784 @@ fn report_counts_only_abox_inferences() {
     assert!(schema_section.contains("\"inferred\": 0"));
 }
 
+#[test]
+fn infers_inverse_property() {
+    let inferred = reason(
+        "<http://example.com/alice> <http://example.com/knows> <http://example.com/bob> .\n",
+        "\
+Prefix(:=<http://example.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://example.com/ontology>
+Declaration(ObjectProperty(:knows))
+Declaration(ObjectProperty(:knownBy))
+InverseObjectProperties(:knows :knownBy)
+)",
+    );
+    assert!(inferred
+        .contains("<http://example.com/bob> <http://example.com/knownBy> <http://example.com/alice> ."));
+}
+
+#[test]
+fn infers_symmetric_property() {
+    let inferred = reason(
+        "<http://example.com/alice> <http://example.com/friendOf> <http://example.com/bob> .\n",
+        "\
+Prefix(:=<http://example.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://example.com/ontology>
+Declaration(ObjectProperty(:friendOf))
+SymmetricObjectProperty(:friendOf)
+)",
+    );
+    assert!(inferred
+        .contains("<http://example.com/bob> <http://example.com/friendOf> <http://example.com/alice> ."));
+}
+
+#[test]
+fn normalizes_equivalent_classes_to_mutual_subclass() {
+    let inferred = reason(
+        "\
+<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Person> .
+<http://example.com/bob> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Human> .
+",
+        "\
+Prefix(:=<http://example.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://example.com/ontology>
+Declaration(Class(:Person))
+Declaration(Class(:Human))
+EquivalentClasses(:Person :Human)
+)",
+    );
+    // alice is Person → also Human (via equivalence)
+    assert!(inferred.contains(
+        "<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Human> ."
+    ));
+    // bob is Human → also Person (via equivalence)
+    assert!(inferred.contains(
+        "<http://example.com/bob> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Person> ."
+    ));
+}
+
+#[test]
+fn parses_property_chain_and_records_in_schema() {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data = temp_dir.path().join("data.nt");
+    let ontology = temp_dir.path().join("ontology.ofn");
+    let output = temp_dir.path().join("inferred.nt");
+    let report = temp_dir.path().join("report.json");
+
+    write(&data, "");
+    write(
+        &ontology,
+        "\
+Prefix(:=<http://example.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://example.com/ontology>
+Declaration(ObjectProperty(:hasParent))
+Declaration(ObjectProperty(:hasSibling))
+Declaration(ObjectProperty(:hasUncle))
+Declaration(ObjectProperty(:friendOf))
+SubObjectPropertyOf(ObjectPropertyChain(:hasParent :hasSibling) :hasUncle)
+TransitiveObjectProperty(:hasParent)
+FunctionalObjectProperty(:friendOf)
+)
+",
+    );
+
+    strix::run([
+        "strix",
+        "reason",
+        data.to_str().unwrap(),
+        "--ontology",
+        ontology.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ])
+    .expect("reasoning run should succeed");
+
+    // Verify no unsupported constructs for these axioms
+    let report_json = fs::read_to_string(&report).expect("report should exist");
+    assert!(!report_json.contains("property chain"));
+    assert!(!report_json.contains("TransitiveObjectProperty"));
+}
+
+#[test]
+fn infers_inverse_with_subproperty_interaction() {
+    let inferred = reason(
+        "<http://example.com/alice> <http://example.com/knows> <http://example.com/bob> .\n",
+        "\
+Prefix(:=<http://example.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://example.com/ontology>
+Declaration(ObjectProperty(:knows))
+Declaration(ObjectProperty(:knownBy))
+Declaration(ObjectProperty(:relatedTo))
+InverseObjectProperties(:knows :knownBy)
+SubObjectPropertyOf(:knownBy :relatedTo)
+ObjectPropertyDomain(:relatedTo :Entity)
+)",
+    );
+    // alice knows bob → bob knownBy alice (inverse)
+    assert!(inferred
+        .contains("<http://example.com/bob> <http://example.com/knownBy> <http://example.com/alice> ."));
+    // bob knownBy alice → bob relatedTo alice (subproperty)
+    assert!(inferred
+        .contains("<http://example.com/bob> <http://example.com/relatedTo> <http://example.com/alice> ."));
+    // bob relatedTo alice → bob type Entity (domain)
+    assert!(inferred.contains(
+        "<http://example.com/bob> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Entity> ."
+    ));
+}
+
+// ─── Rule isolation tests ───────────────────────────────────────────────────
+
+#[test]
+fn subclass_only() {
+    let inferred = reason(
+        "<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:A))
+Declaration(Class(:B))
+SubClassOf(:A :B)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> ."));
+    assert_eq!(count_triples(&inferred), 1, "only one triple should be inferred: {inferred}");
+}
+
+#[test]
+fn subproperty_only() {
+    let inferred = reason(
+        "<http://x.com/a> <http://x.com/p> <http://x.com/b> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+Declaration(ObjectProperty(:q))
+SubObjectPropertyOf(:p :q)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/q> <http://x.com/b> ."));
+    assert_eq!(count_triples(&inferred), 1, "only one triple should be inferred: {inferred}");
+}
+
+#[test]
+fn domain_only() {
+    let inferred = reason(
+        "<http://x.com/a> <http://x.com/p> <http://x.com/b> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+Declaration(Class(:C))
+ObjectPropertyDomain(:p :C)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> ."));
+    // Domain should NOT type the object
+    assert!(!inferred.contains("<http://x.com/b>"));
+    assert_eq!(count_triples(&inferred), 1, "only domain for subject: {inferred}");
+}
+
+#[test]
+fn range_only() {
+    let inferred = reason(
+        "<http://x.com/a> <http://x.com/p> <http://x.com/b> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+Declaration(Class(:C))
+ObjectPropertyRange(:p :C)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> ."));
+    // Range should NOT type the subject
+    assert!(!inferred.contains("<http://x.com/a>"));
+    assert_eq!(count_triples(&inferred), 1, "only range for object: {inferred}");
+}
+
+#[test]
+fn domain_does_not_fire_for_unrelated_property() {
+    let inferred = reason(
+        "<http://x.com/a> <http://x.com/q> <http://x.com/b> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+Declaration(ObjectProperty(:q))
+Declaration(Class(:C))
+ObjectPropertyDomain(:p :C)
+)",
+    );
+    assert_eq!(count_triples(&inferred), 0, "domain on :p should not fire for :q: {inferred}");
+}
+
+#[test]
+fn multiple_domains_on_single_property() {
+    let inferred = reason(
+        "<http://x.com/a> <http://x.com/p> <http://x.com/b> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+Declaration(Class(:C))
+Declaration(Class(:D))
+ObjectPropertyDomain(:p :C)
+ObjectPropertyDomain(:p :D)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> ."));
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/D> ."));
+    assert_eq!(count_triples(&inferred), 2, "both domains should fire: {inferred}");
+}
+
+#[test]
+fn multiple_ranges_on_single_property() {
+    let inferred = reason(
+        "<http://x.com/a> <http://x.com/p> <http://x.com/b> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+Declaration(Class(:C))
+Declaration(Class(:D))
+ObjectPropertyRange(:p :C)
+ObjectPropertyRange(:p :D)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> ."));
+    assert!(inferred.contains("<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/D> ."));
+    assert_eq!(count_triples(&inferred), 2, "both ranges should fire: {inferred}");
+}
+
+#[test]
+fn transitive_property_simple_chain() {
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://x.com/partOf> <http://x.com/b> .
+<http://x.com/b> <http://x.com/partOf> <http://x.com/c> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:partOf))
+TransitiveObjectProperty(:partOf)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/partOf> <http://x.com/c> ."));
+    assert_eq!(count_triples(&inferred), 1, "one transitive inference: {inferred}");
+}
+
+#[test]
+fn transitive_property_longer_chain() {
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://x.com/partOf> <http://x.com/b> .
+<http://x.com/b> <http://x.com/partOf> <http://x.com/c> .
+<http://x.com/c> <http://x.com/partOf> <http://x.com/d> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:partOf))
+TransitiveObjectProperty(:partOf)
+)",
+    );
+    // a→b→c→d should produce: a→c, a→d, b→d
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/partOf> <http://x.com/c> ."));
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/partOf> <http://x.com/d> ."));
+    assert!(inferred.contains("<http://x.com/b> <http://x.com/partOf> <http://x.com/d> ."));
+    assert_eq!(count_triples(&inferred), 3, "a→c, a→d, b→d: {inferred}");
+}
+
+#[test]
+fn transitive_property_does_not_fire_for_non_transitive() {
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://x.com/p> <http://x.com/b> .
+<http://x.com/b> <http://x.com/p> <http://x.com/c> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+)",
+    );
+    assert_eq!(count_triples(&inferred), 0, "non-transitive property should not chain: {inferred}");
+}
+
+#[test]
+fn transitive_property_cyclic() {
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://x.com/partOf> <http://x.com/b> .
+<http://x.com/b> <http://x.com/partOf> <http://x.com/a> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:partOf))
+TransitiveObjectProperty(:partOf)
+)",
+    );
+    // a→b, b→a. Transitive: a→b∧b→a → a→a, b→a∧a→b → b→b.
+    // Reflexive results are novel but a→b and b→a are already asserted.
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/partOf> <http://x.com/a> ."));
+    assert!(inferred.contains("<http://x.com/b> <http://x.com/partOf> <http://x.com/b> ."));
+    assert_eq!(count_triples(&inferred), 2, "cyclic transitive converges: {inferred}");
+}
+
+// ─── Over-inference guards ──────────────────────────────────────────────────
+
+#[test]
+fn reflexive_subclass_produces_no_inferences() {
+    let inferred = reason(
+        "<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:A))
+SubClassOf(:A :A)
+)",
+    );
+    assert_eq!(count_triples(&inferred), 0, "reflexive subClassOf should not produce inferences: {inferred}");
+}
+
+#[test]
+fn inverse_does_not_duplicate_existing_triple() {
+    // If bob already has the triple, inverse should not re-emit it
+    let inferred = reason(
+        "\
+<http://x.com/alice> <http://x.com/knows> <http://x.com/bob> .
+<http://x.com/bob> <http://x.com/knownBy> <http://x.com/alice> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:knows))
+Declaration(ObjectProperty(:knownBy))
+InverseObjectProperties(:knows :knownBy)
+)",
+    );
+    // The inverse of alice knows bob is bob knownBy alice — already asserted.
+    // The inverse of bob knownBy alice is alice knows bob — already asserted.
+    // So zero net new triples.
+    assert_eq!(count_triples(&inferred), 0, "already-present inverse triples should not be re-emitted: {inferred}");
+}
+
+#[test]
+fn symmetric_does_not_duplicate_existing_triple() {
+    let inferred = reason(
+        "\
+<http://x.com/alice> <http://x.com/friendOf> <http://x.com/bob> .
+<http://x.com/bob> <http://x.com/friendOf> <http://x.com/alice> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:friendOf))
+SymmetricObjectProperty(:friendOf)
+)",
+    );
+    assert_eq!(count_triples(&inferred), 0, "symmetric should not re-emit existing triples: {inferred}");
+}
+
+// ─── Multi-iteration convergence ────────────────────────────────────────────
+
+#[test]
+fn deep_subclass_chain_five_levels() {
+    let inferred = reason(
+        "<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:A))
+Declaration(Class(:B))
+Declaration(Class(:C))
+Declaration(Class(:D))
+Declaration(Class(:E))
+SubClassOf(:A :B)
+SubClassOf(:B :C)
+SubClassOf(:C :D)
+SubClassOf(:D :E)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> ."));
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> ."));
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/D> ."));
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/E> ."));
+    assert_eq!(count_triples(&inferred), 4, "A→B→C→D→E produces 4 inferences: {inferred}");
+}
+
+#[test]
+fn multi_level_subproperty_chain() {
+    let inferred = reason(
+        "<http://x.com/a> <http://x.com/p> <http://x.com/b> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+Declaration(ObjectProperty(:q))
+Declaration(ObjectProperty(:r))
+SubObjectPropertyOf(:p :q)
+SubObjectPropertyOf(:q :r)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/q> <http://x.com/b> ."));
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/r> <http://x.com/b> ."));
+    assert_eq!(count_triples(&inferred), 2, "p→q→r produces 2 inferences: {inferred}");
+}
+
+#[test]
+fn cyclic_subclass_converges() {
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .
+<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:A))
+Declaration(Class(:B))
+SubClassOf(:A :B)
+SubClassOf(:B :A)
+)",
+    );
+    // a:A → a:B, b:B → b:A, then a:B → a:A (already asserted), b:A → b:B (already asserted)
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> ."));
+    assert!(inferred.contains("<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> ."));
+    assert_eq!(count_triples(&inferred), 2, "cycle should converge with exactly 2 new triples: {inferred}");
+}
+
+#[test]
+fn diamond_subclass_hierarchy() {
+    //     A
+    //    / \
+    //   B   C
+    //    \ /
+    //     D
+    let inferred = reason(
+        "<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/D> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:A))
+Declaration(Class(:B))
+Declaration(Class(:C))
+Declaration(Class(:D))
+SubClassOf(:D :B)
+SubClassOf(:D :C)
+SubClassOf(:B :A)
+SubClassOf(:C :A)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> ."));
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> ."));
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> ."));
+    // A should appear exactly once despite two paths to it
+    assert_eq!(count_triples(&inferred), 3, "diamond should not duplicate A: {inferred}");
+}
+
+// ─── Edge cases ─────────────────────────────────────────────────────────────
+
+#[test]
+fn empty_data_with_schema_produces_no_output() {
+    let inferred = reason(
+        "",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:A))
+Declaration(Class(:B))
+SubClassOf(:A :B)
+)",
+    );
+    assert_eq!(count_triples(&inferred), 0, "no data means no inferences: {inferred}");
+}
+
+#[test]
+fn data_without_schema_produces_no_inferences() {
+    let inferred = reason_data_only(
+        "\
+<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .
+<http://x.com/a> <http://x.com/p> <http://x.com/b> .
+",
+    );
+    assert_eq!(count_triples(&inferred), 0, "no schema means no inferences: {inferred}");
+}
+
+// ─── Rule interaction tests ─────────────────────────────────────────────────
+
+#[test]
+fn subproperty_triggers_domain_on_superproperty() {
+    let inferred = reason(
+        "<http://x.com/a> <http://x.com/p> <http://x.com/b> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+Declaration(ObjectProperty(:q))
+Declaration(Class(:C))
+SubObjectPropertyOf(:p :q)
+ObjectPropertyDomain(:q :C)
+)",
+    );
+    // p→q infers (a, q, b), then domain(q) infers type(a, C)
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/q> <http://x.com/b> ."));
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> ."));
+    assert_eq!(count_triples(&inferred), 2, "subproperty + domain interaction: {inferred}");
+}
+
+#[test]
+fn domain_triggers_subclass() {
+    let inferred = reason(
+        "<http://x.com/a> <http://x.com/p> <http://x.com/b> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+Declaration(Class(:C))
+Declaration(Class(:D))
+ObjectPropertyDomain(:p :C)
+SubClassOf(:C :D)
+)",
+    );
+    // domain(p) → type(a, C), then C⊑D → type(a, D)
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> ."));
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/D> ."));
+    assert_eq!(count_triples(&inferred), 2, "domain + subclass chain: {inferred}");
+}
+
+#[test]
+fn symmetric_plus_subproperty_interaction() {
+    let inferred = reason(
+        "<http://x.com/alice> <http://x.com/friendOf> <http://x.com/bob> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:friendOf))
+Declaration(ObjectProperty(:relatedTo))
+SymmetricObjectProperty(:friendOf)
+SubObjectPropertyOf(:friendOf :relatedTo)
+)",
+    );
+    // symmetric: bob friendOf alice
+    assert!(inferred.contains("<http://x.com/bob> <http://x.com/friendOf> <http://x.com/alice> ."));
+    // subproperty on original: alice relatedTo bob
+    assert!(inferred.contains("<http://x.com/alice> <http://x.com/relatedTo> <http://x.com/bob> ."));
+    // subproperty on symmetric result: bob relatedTo alice
+    assert!(inferred.contains("<http://x.com/bob> <http://x.com/relatedTo> <http://x.com/alice> ."));
+    assert_eq!(count_triples(&inferred), 3, "symmetric + subproperty: {inferred}");
+}
+
+#[test]
+fn transitive_plus_domain_interaction() {
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://x.com/partOf> <http://x.com/b> .
+<http://x.com/b> <http://x.com/partOf> <http://x.com/c> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:partOf))
+Declaration(Class(:Component))
+TransitiveObjectProperty(:partOf)
+ObjectPropertyDomain(:partOf :Component)
+)",
+    );
+    // transitive: a partOf c
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/partOf> <http://x.com/c> ."));
+    // domain fires on all 3 property assertions (2 asserted + 1 inferred):
+    // a type Component, b type Component (from a→b and b→c), a type Component again (from a→c, dedup)
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Component> ."));
+    assert!(inferred.contains("<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Component> ."));
+    // 1 transitive property + 2 domain types = 3 inferences
+    assert_eq!(count_triples(&inferred), 3, "transitive + domain: {inferred}");
+}
+
+#[test]
+fn transitive_plus_subproperty_interaction() {
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://x.com/strictPartOf> <http://x.com/b> .
+<http://x.com/b> <http://x.com/strictPartOf> <http://x.com/c> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:strictPartOf))
+Declaration(ObjectProperty(:partOf))
+SubObjectPropertyOf(:strictPartOf :partOf)
+TransitiveObjectProperty(:partOf)
+)",
+    );
+    // subproperty: a partOf b, b partOf c
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/partOf> <http://x.com/b> ."));
+    assert!(inferred.contains("<http://x.com/b> <http://x.com/partOf> <http://x.com/c> ."));
+    // transitive on partOf: a partOf c
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/partOf> <http://x.com/c> ."));
+    assert_eq!(count_triples(&inferred), 3, "subproperty + transitive: {inferred}");
+}
+
+#[test]
+fn double_inverse_is_identity() {
+    // inverseOf(knows, knownBy) + inverseOf(knownBy, knows) → applying both is identity
+    let inferred = reason(
+        "<http://x.com/alice> <http://x.com/knows> <http://x.com/bob> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:knows))
+Declaration(ObjectProperty(:knownBy))
+InverseObjectProperties(:knows :knownBy)
+)",
+    );
+    // alice knows bob → bob knownBy alice (inverse)
+    // bob knownBy alice → alice knows bob (inverse back) — already asserted
+    assert!(inferred.contains("<http://x.com/bob> <http://x.com/knownBy> <http://x.com/alice> ."));
+    assert_eq!(count_triples(&inferred), 1, "double inverse should not produce extra triples: {inferred}");
+}
+
+#[test]
+fn equivalent_classes_three_way() {
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .
+<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> .
+<http://x.com/c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:A))
+Declaration(Class(:B))
+Declaration(Class(:C))
+EquivalentClasses(:A :B :C)
+)",
+    );
+    // a:A → a:B, a:C
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> ."));
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> ."));
+    // b:B → b:A, b:C
+    assert!(inferred.contains("<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> ."));
+    assert!(inferred.contains("<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> ."));
+    // c:C → c:A, c:B
+    assert!(inferred.contains("<http://x.com/c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> ."));
+    assert!(inferred.contains("<http://x.com/c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> ."));
+    assert_eq!(count_triples(&inferred), 6, "3-way equivalence: each instance gets 2 new types: {inferred}");
+}
+
+#[test]
+fn multiple_instances_same_class_hierarchy() {
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .
+<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .
+<http://x.com/c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:A))
+Declaration(Class(:B))
+SubClassOf(:A :B)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> ."));
+    assert!(inferred.contains("<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> ."));
+    assert!(inferred.contains("<http://x.com/c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> ."));
+    assert_eq!(count_triples(&inferred), 3, "each instance inferred independently: {inferred}");
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
 fn write(path: &Path, content: &str) {
     fs::write(path, content).expect("test fixture should be written");
+}
+
+/// Count non-empty lines in an N-Triples file (each line = one triple).
+fn count_triples(ntriples: &str) -> usize {
+    ntriples.lines().filter(|l| !l.trim().is_empty()).count()
+}
+
+/// Minimal harness: write data + ontology, run reasoner, return inferred N-Triples string.
+/// Uses `--emit inferred` (default) so only new triples appear.
+fn reason(data: &str, ontology: &str) -> String {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data_path = temp_dir.path().join("data.nt");
+    let ontology_path = temp_dir.path().join("ontology.ofn");
+    let output_path = temp_dir.path().join("inferred.nt");
+
+    write(&data_path, data);
+    write(&ontology_path, ontology);
+
+    strix::run([
+        "strix",
+        "reason",
+        data_path.to_str().unwrap(),
+        "--ontology",
+        ontology_path.to_str().unwrap(),
+        "--output",
+        output_path.to_str().unwrap(),
+    ])
+    .expect("reasoning run should succeed");
+
+    fs::read_to_string(&output_path).expect("output should exist")
+}
+
+/// Like `reason` but with no ontology file (data-only, or extracted schema).
+fn reason_data_only(data: &str) -> String {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data_path = temp_dir.path().join("data.nt");
+    let output_path = temp_dir.path().join("inferred.nt");
+
+    write(&data_path, data);
+
+    strix::run([
+        "strix",
+        "reason",
+        data_path.to_str().unwrap(),
+        "--output",
+        output_path.to_str().unwrap(),
+    ])
+    .expect("reasoning run should succeed");
+
+    fs::read_to_string(&output_path).expect("output should exist")
 }
 
 fn write_gzip(path: &Path, content: &str) {

@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
+
 use crate::compile::CompiledSchema;
+use crate::dict::TermId;
 use crate::error::Result;
 use crate::store::FactStore;
 use crate::store::delta::difference_streaming_into;
@@ -18,6 +21,86 @@ impl ReasoningStats {
         self.inferred_types + self.inferred_properties
     }
 }
+
+// ─── In-memory index for join-requiring rules ───────────────────────────────
+
+/// In-memory index of property assertions for join-requiring rules.
+///
+/// Only indexes predicates listed in `CompiledSchema::indexed_predicates`
+/// (currently transitive properties; Steps 4-5 will add more).
+struct PropertyIndex {
+    /// (predicate, subject) → sorted vec of objects
+    by_pred_subj: BTreeMap<(TermId, TermId), Vec<TermId>>,
+    /// (predicate, object) → sorted vec of subjects
+    by_pred_obj: BTreeMap<(TermId, TermId), Vec<TermId>>,
+}
+
+impl PropertyIndex {
+    fn new() -> Self {
+        Self {
+            by_pred_subj: BTreeMap::new(),
+            by_pred_obj: BTreeMap::new(),
+        }
+    }
+
+    fn insert(&mut self, subject: TermId, predicate: TermId, object: TermId) {
+        self.by_pred_subj
+            .entry((predicate, subject))
+            .or_default()
+            .push(object);
+        self.by_pred_obj
+            .entry((predicate, object))
+            .or_default()
+            .push(subject);
+    }
+
+    fn dedup(&mut self) {
+        for values in self.by_pred_subj.values_mut() {
+            values.sort_unstable();
+            values.dedup();
+        }
+        for values in self.by_pred_obj.values_mut() {
+            values.sort_unstable();
+            values.dedup();
+        }
+    }
+
+    /// Objects z such that property(subject, predicate, z) is known.
+    fn objects_for(&self, predicate: TermId, subject: TermId) -> &[TermId] {
+        self.by_pred_subj
+            .get(&(predicate, subject))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Subjects w such that property(w, predicate, object) is known.
+    fn subjects_for(&self, predicate: TermId, object: TermId) -> &[TermId] {
+        self.by_pred_obj
+            .get(&(predicate, object))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+}
+
+/// Build a property index from current known properties, filtered to only
+/// predicates that need indexing for join-based rules.
+fn build_property_index(store: &mut FactStore, schema: &CompiledSchema) -> Result<PropertyIndex> {
+    if schema.indexed_predicates.is_empty() {
+        return Ok(PropertyIndex::new());
+    }
+
+    let mut index = PropertyIndex::new();
+    for result in store.known_properties_iter()? {
+        let (subject, predicate, object) = result?;
+        if schema.indexed_predicates.contains(&predicate) {
+            index.insert(subject, predicate, object);
+        }
+    }
+    index.dedup();
+    Ok(index)
+}
+
+// ─── Rule application ───────────────────────────────────────────────────────
 
 fn apply_type_rules(
     instance: u64,
@@ -48,8 +131,43 @@ fn apply_property_rules(
     for &range in schema.ranges_for(predicate) {
         candidate_types.push((object, range))?;
     }
+    for &inverse in schema.inverses_for(predicate) {
+        candidate_properties.push((object, inverse, subject))?;
+    }
+    if schema.is_symmetric(predicate) {
+        candidate_properties.push((object, predicate, subject))?;
+    }
     Ok(())
 }
+
+/// Join-based rules for property deltas that require an in-memory index.
+///
+/// Currently handles transitive properties. When delta property(x, p, y)
+/// arrives and p is transitive:
+///   - Forward: for each known property(y, p, z), emit property(x, p, z)
+///   - Backward: for each known property(w, p, x), emit property(w, p, y)
+fn apply_property_join_rules(
+    subject: TermId,
+    predicate: TermId,
+    object: TermId,
+    schema: &CompiledSchema,
+    property_index: &PropertyIndex,
+    candidate_properties: &mut TernaryRelation,
+) -> Result<()> {
+    if schema.is_transitive(predicate) {
+        // Forward: delta(x, p, y) ∧ known(y, p, z) → candidate(x, p, z)
+        for &z in property_index.objects_for(predicate, object) {
+            candidate_properties.push((subject, predicate, z))?;
+        }
+        // Backward: known(w, p, x) ∧ delta(x, p, y) → candidate(w, p, y)
+        for &w in property_index.subjects_for(predicate, subject) {
+            candidate_properties.push((w, predicate, object))?;
+        }
+    }
+    Ok(())
+}
+
+// ─── Fixpoint loop ──────────────────────────────────────────────────────────
 
 pub fn materialize(
     store: &mut FactStore,
@@ -68,6 +186,8 @@ pub fn materialize(
     let mut delta_properties =
         TernaryRelation::new(work_dir, "engine-delta-props", relation_budget);
 
+    let needs_property_index = !schema.indexed_predicates.is_empty();
+
     // Seed: stream asserted facts to generate initial candidates
     for result in store.asserted_types_iter()? {
         let (instance, class) = result?;
@@ -83,6 +203,23 @@ pub fn materialize(
             &mut candidate_types,
             &mut candidate_properties,
         )?;
+    }
+
+    // Seed join-based rules (transitive properties, etc.) using an index
+    // built from asserted facts.
+    if needs_property_index {
+        let seed_index = build_property_index(store, schema)?;
+        for result in store.asserted_properties_iter()? {
+            let (subject, predicate, object) = result?;
+            apply_property_join_rules(
+                subject,
+                predicate,
+                object,
+                schema,
+                &seed_index,
+                &mut candidate_properties,
+            )?;
+        }
     }
 
     loop {
@@ -133,12 +270,35 @@ pub fn materialize(
         delta_types.compact()?;
         delta_properties.compact()?;
 
+        // Build in-memory index of known properties for join-based rules.
+        // Built BEFORE consuming deltas so it reflects the pre-delta state.
+        let property_index = if needs_property_index {
+            build_property_index(store, schema)?
+        } else {
+            PropertyIndex::new()
+        };
+
         // Single-pass delta consumption: push into derived + generate next candidates
         for result in MergeBinaryIter::new(delta_types.segment_iters()?)? {
             let (instance, class) = result?;
             store.derived_types_mut().push((instance, class))?;
             apply_type_rules(instance, class, schema, &mut candidate_types)?;
         }
+
+        // Build a delta-only index for delta⋈delta joins (transitive, etc.)
+        let delta_property_index = if needs_property_index {
+            let mut idx = PropertyIndex::new();
+            for result in MergeTernaryIter::new(delta_properties.segment_iters()?)? {
+                let (s, p, o) = result?;
+                if schema.indexed_predicates.contains(&p) {
+                    idx.insert(s, p, o);
+                }
+            }
+            idx.dedup();
+            idx
+        } else {
+            PropertyIndex::new()
+        };
 
         for result in MergeTernaryIter::new(delta_properties.segment_iters()?)? {
             let (subject, predicate, object) = result?;
@@ -151,6 +311,24 @@ pub fn materialize(
                 object,
                 schema,
                 &mut candidate_types,
+                &mut candidate_properties,
+            )?;
+            // delta ⋈ known joins
+            apply_property_join_rules(
+                subject,
+                predicate,
+                object,
+                schema,
+                &property_index,
+                &mut candidate_properties,
+            )?;
+            // delta ⋈ delta joins
+            apply_property_join_rules(
+                subject,
+                predicate,
+                object,
+                schema,
+                &delta_property_index,
                 &mut candidate_properties,
             )?;
         }

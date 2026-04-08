@@ -7,10 +7,21 @@ use crate::owl::RawSchema;
 
 #[derive(Clone, Debug)]
 pub struct CompiledSchema {
+    // RDFS (Phase 1)
     pub superclasses: BTreeMap<TermId, Vec<TermId>>,
     pub superproperties: BTreeMap<TermId, Vec<TermId>>,
     pub domains: BTreeMap<TermId, Vec<TermId>>,
     pub ranges: BTreeMap<TermId, Vec<TermId>>,
+
+    // Property axioms (Phase 2)
+    pub inverses: BTreeMap<TermId, Vec<TermId>>,
+    pub symmetric_properties: BTreeSet<TermId>,
+    pub transitive_properties: BTreeSet<TermId>,
+
+    /// Predicates that require in-memory indexing for join evaluation.
+    /// Currently: transitive properties. Will grow in Steps 4-5.
+    pub indexed_predicates: BTreeSet<TermId>,
+
     pub schema_iterations: usize,
     pub schema_inferred: usize,
     pub rule_set: ir::RuleSet,
@@ -41,6 +52,21 @@ impl CompiledSchema {
     pub fn ranges_for(&self, property: TermId) -> &[TermId] {
         self.ranges.get(&property).map(Vec::as_slice).unwrap_or(&[])
     }
+
+    pub fn inverses_for(&self, property: TermId) -> &[TermId] {
+        self.inverses
+            .get(&property)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn is_symmetric(&self, property: TermId) -> bool {
+        self.symmetric_properties.contains(&property)
+    }
+
+    pub fn is_transitive(&self, property: TermId) -> bool {
+        self.transitive_properties.contains(&property)
+    }
 }
 
 pub fn compile_schema(schema: &RawSchema) -> CompiledSchema {
@@ -49,14 +75,22 @@ pub fn compile_schema(schema: &RawSchema) -> CompiledSchema {
     let (subproperty_closure, subproperty_iterations, subproperty_inferred) =
         transitive_closure(&schema.subproperties);
 
+    // Predicates needing in-memory indexing for join-based rules.
+    // Currently: transitive properties. Steps 4-5 will add more.
+    let indexed_predicates = schema.transitive_properties.clone();
+
     CompiledSchema {
         superclasses: to_map(&subclass_closure),
         superproperties: to_map(&subproperty_closure),
         domains: to_map(&schema.domains),
         ranges: to_map(&schema.ranges),
+        inverses: to_map(&schema.inverse_properties),
+        symmetric_properties: schema.symmetric_properties.clone(),
+        transitive_properties: schema.transitive_properties.clone(),
+        indexed_predicates,
         schema_iterations: subclass_iterations.max(subproperty_iterations),
         schema_inferred: subclass_inferred + subproperty_inferred,
-        rule_set: ir::RuleSet::phase_one(),
+        rule_set: ir::RuleSet::build(),
     }
 }
 

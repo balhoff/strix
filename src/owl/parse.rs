@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use horned_owl::io::{ParserConfiguration, ofn, owx, rdf};
 use horned_owl::model::{
-    ClassExpression, Component, Kinded, ObjectPropertyExpression, RcStr,
+    ClassExpression, Component, Individual, ObjectPropertyExpression, RcStr,
     SubObjectPropertyExpression,
 };
 use horned_owl::ontology::set::SetOntology;
@@ -354,7 +354,10 @@ fn absorb_ontology(
 ) {
     for annotated in ontology {
         match &annotated.component {
+            // Metadata — silently ignored
             Component::OntologyID(_) | Component::DocIRI(_) | Component::OntologyAnnotation(_) => {}
+
+            // Declarations
             Component::DeclareClass(axiom) => {
                 schema
                     .classes
@@ -377,44 +380,199 @@ fn absorb_ontology(
                     .properties
                     .insert(dictionary.encode_iri(axiom.0.as_ref()));
             }
-            Component::SubClassOf(axiom) => match (
-                encode_named_class(&axiom.sub, dictionary),
-                encode_named_class(&axiom.sup, dictionary),
-            ) {
-                (Ok(subclass), Ok(superclass)) => {
-                    schema.subclasses.insert((subclass, superclass));
-                }
-                _ => {
-                    schema.unsupported.insert(
-                        "anonymous subclass axioms are deferred beyond Phase 1".to_string(),
-                    );
-                }
-            },
-            Component::SubObjectPropertyOf(axiom) => match (
-                encode_named_subobject_property(&axiom.sub, dictionary),
-                encode_named_object_property(&axiom.sup, dictionary),
-            ) {
-                (Ok(subproperty), Ok(superproperty)) => {
-                    schema.subproperties.insert((subproperty, superproperty));
-                }
-                _ => {
-                    schema.unsupported.insert(
-                        "complex object property axioms are deferred beyond Phase 1".to_string(),
-                    );
-                }
-            },
-            Component::SubDataPropertyOf(axiom) => {
-                let subproperty = dictionary.encode_iri(axiom.sub.as_ref());
-                let superproperty = dictionary.encode_iri(axiom.sup.as_ref());
-                schema.subproperties.insert((subproperty, superproperty));
+            Component::DeclareNamedIndividual(_) | Component::DeclareDatatype(_) => {}
+
+            // SubClassOf — delegates to lower_subclass_of for anonymous expressions
+            Component::SubClassOf(axiom) => {
+                lower_subclass_of(&axiom.sub, &axiom.sup, dictionary, schema);
             }
-            Component::SubAnnotationPropertyOf(axiom) => {
-                if !ignore_annotation_axioms {
-                    let subproperty = dictionary.encode_iri(axiom.sub.as_ref());
-                    let superproperty = dictionary.encode_iri(axiom.sup.as_ref());
-                    schema.subproperties.insert((subproperty, superproperty));
+
+            // EquivalentClasses → mutual SubClassOf pairs
+            Component::EquivalentClasses(axiom) => {
+                let classes = &axiom.0;
+                for i in 0..classes.len() {
+                    for j in (i + 1)..classes.len() {
+                        lower_subclass_of(&classes[i], &classes[j], dictionary, schema);
+                        lower_subclass_of(&classes[j], &classes[i], dictionary, schema);
+                    }
                 }
             }
+
+            // DisjointClasses
+            Component::DisjointClasses(axiom) => {
+                let ids: Vec<TermId> = axiom
+                    .0
+                    .iter()
+                    .filter_map(|ce| encode_named_class(ce, dictionary).ok())
+                    .collect();
+                if ids.len() < axiom.0.len() {
+                    schema.unsupported.insert(
+                        "DisjointClasses with anonymous class expression members".to_string(),
+                    );
+                }
+                if ids.len() >= 2 {
+                    schema.disjoint_classes.push(ids);
+                }
+            }
+
+            // DisjointUnion → union decomposition (SubClassOf(Ci, C)) + pairwise disjoint
+            Component::DisjointUnion(axiom) => {
+                let parent = dictionary.encode_iri(axiom.0.as_ref());
+                let mut member_ids = Vec::new();
+                for ce in &axiom.1 {
+                    if let Ok(member) = encode_named_class(ce, dictionary) {
+                        schema.subclasses.insert((member, parent));
+                        member_ids.push(member);
+                    }
+                }
+                if member_ids.len() < axiom.1.len() {
+                    schema.unsupported.insert(
+                        "DisjointUnion with anonymous class expression members".to_string(),
+                    );
+                }
+                if member_ids.len() >= 2 {
+                    schema.disjoint_classes.push(member_ids);
+                }
+            }
+
+            // SubObjectPropertyOf — named or chain
+            Component::SubObjectPropertyOf(axiom) => match &axiom.sub {
+                SubObjectPropertyExpression::ObjectPropertyExpression(sub_expr) => {
+                    match (
+                        encode_named_object_property(sub_expr, dictionary),
+                        encode_named_object_property(&axiom.sup, dictionary),
+                    ) {
+                        (Ok(sub), Ok(sup)) => {
+                            schema.subproperties.insert((sub, sup));
+                        }
+                        _ => {
+                            schema.unsupported.insert(
+                                "SubObjectPropertyOf with inverse property expressions"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                SubObjectPropertyExpression::ObjectPropertyChain(chain) => {
+                    if let Ok(sup) = encode_named_object_property(&axiom.sup, dictionary) {
+                        let chain_ids: Vec<TermId> = chain
+                            .iter()
+                            .filter_map(|ope| encode_named_object_property(ope, dictionary).ok())
+                            .collect();
+                        if chain_ids.len() == chain.len() && chain_ids.len() >= 2 {
+                            schema.property_chains.push((sup, chain_ids));
+                        } else {
+                            schema.unsupported.insert(
+                                "property chain with inverse property expressions".to_string(),
+                            );
+                        }
+                    }
+                }
+            },
+
+            // EquivalentObjectProperties → mutual SubPropertyOf
+            Component::EquivalentObjectProperties(axiom) => {
+                let props = &axiom.0;
+                for i in 0..props.len() {
+                    for j in (i + 1)..props.len() {
+                        match (
+                            encode_named_object_property(&props[i], dictionary),
+                            encode_named_object_property(&props[j], dictionary),
+                        ) {
+                            (Ok(a), Ok(b)) => {
+                                schema.subproperties.insert((a, b));
+                                schema.subproperties.insert((b, a));
+                            }
+                            _ => {
+                                schema.unsupported.insert(
+                                    "EquivalentObjectProperties with inverse property expression"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // EquivalentDataProperties → mutual SubPropertyOf
+            Component::EquivalentDataProperties(axiom) => {
+                let props = &axiom.0;
+                for i in 0..props.len() {
+                    for j in (i + 1)..props.len() {
+                        let a = dictionary.encode_iri(props[i].as_ref());
+                        let b = dictionary.encode_iri(props[j].as_ref());
+                        schema.subproperties.insert((a, b));
+                        schema.subproperties.insert((b, a));
+                    }
+                }
+            }
+
+            // DisjointObjectProperties
+            Component::DisjointObjectProperties(axiom) => {
+                let ids: Vec<TermId> = axiom
+                    .0
+                    .iter()
+                    .filter_map(|ope| encode_named_object_property(ope, dictionary).ok())
+                    .collect();
+                if ids.len() < axiom.0.len() {
+                    schema.unsupported.insert(
+                        "DisjointObjectProperties with inverse property expression members"
+                            .to_string(),
+                    );
+                }
+                if ids.len() >= 2 {
+                    schema.disjoint_properties.push(ids);
+                }
+            }
+
+            // InverseObjectProperties
+            Component::InverseObjectProperties(axiom) => {
+                let p = dictionary.encode_iri(axiom.0.as_ref());
+                let q = dictionary.encode_iri(axiom.1.as_ref());
+                schema.inverse_properties.insert((p, q));
+                schema.inverse_properties.insert((q, p));
+            }
+
+            // Property characteristics
+            Component::FunctionalObjectProperty(axiom) => {
+                if let Ok(prop) = encode_named_object_property(&axiom.0, dictionary) {
+                    schema.functional_properties.insert(prop);
+                } else {
+                    schema.unsupported.insert(
+                        "FunctionalObjectProperty with inverse property expression".to_string(),
+                    );
+                }
+            }
+            Component::InverseFunctionalObjectProperty(axiom) => {
+                if let Ok(prop) = encode_named_object_property(&axiom.0, dictionary) {
+                    schema.inverse_functional_properties.insert(prop);
+                } else {
+                    schema.unsupported.insert(
+                        "InverseFunctionalObjectProperty with inverse property expression"
+                            .to_string(),
+                    );
+                }
+            }
+            Component::SymmetricObjectProperty(axiom) => {
+                if let Ok(prop) = encode_named_object_property(&axiom.0, dictionary) {
+                    schema.symmetric_properties.insert(prop);
+                } else {
+                    schema.unsupported.insert(
+                        "SymmetricObjectProperty with inverse property expression".to_string(),
+                    );
+                }
+            }
+            Component::TransitiveObjectProperty(axiom) => {
+                if let Ok(prop) = encode_named_object_property(&axiom.0, dictionary) {
+                    schema.transitive_properties.insert(prop);
+                } else {
+                    schema.unsupported.insert(
+                        "TransitiveObjectProperty with inverse property expression".to_string(),
+                    );
+                }
+            }
+
+            // Domain/Range
             Component::ObjectPropertyDomain(axiom) => match (
                 encode_named_object_property(&axiom.ope, dictionary),
                 encode_named_class(&axiom.ce, dictionary),
@@ -424,8 +582,7 @@ fn absorb_ontology(
                 }
                 _ => {
                     schema.unsupported.insert(
-                        "anonymous object property domain axioms are deferred beyond Phase 1"
-                            .to_string(),
+                        "ObjectPropertyDomain with anonymous class expression".to_string(),
                     );
                 }
             },
@@ -438,11 +595,23 @@ fn absorb_ontology(
                 }
                 _ => {
                     schema.unsupported.insert(
-                        "anonymous object property range axioms are deferred beyond Phase 1"
-                            .to_string(),
+                        "ObjectPropertyRange with anonymous class expression".to_string(),
                     );
                 }
             },
+
+            Component::SubDataPropertyOf(axiom) => {
+                let subproperty = dictionary.encode_iri(axiom.sub.as_ref());
+                let superproperty = dictionary.encode_iri(axiom.sup.as_ref());
+                schema.subproperties.insert((subproperty, superproperty));
+            }
+            Component::SubAnnotationPropertyOf(axiom) => {
+                if !ignore_annotation_axioms {
+                    let subproperty = dictionary.encode_iri(axiom.sub.as_ref());
+                    let superproperty = dictionary.encode_iri(axiom.sup.as_ref());
+                    schema.subproperties.insert((subproperty, superproperty));
+                }
+            }
             Component::DataPropertyDomain(axiom) => match encode_named_class(&axiom.ce, dictionary)
             {
                 Ok(class) => {
@@ -451,11 +620,14 @@ fn absorb_ontology(
                 }
                 Err(_) => {
                     schema.unsupported.insert(
-                        "anonymous data property domain axioms are deferred beyond Phase 1"
-                            .to_string(),
+                        "DataPropertyDomain with anonymous class expression".to_string(),
                     );
                 }
             },
+            Component::FunctionalDataProperty(axiom) => {
+                let prop = dictionary.encode_iri(axiom.0.as_ref());
+                schema.functional_properties.insert(prop);
+            }
             Component::AnnotationPropertyDomain(axiom) => {
                 if !ignore_annotation_axioms {
                     let property = dictionary.encode_iri(axiom.ap.as_ref());
@@ -470,23 +642,271 @@ fn absorb_ontology(
                     schema.ranges.insert((property, range));
                 }
             }
+
+            // Assertions — silently accepted (they're ABox, not TBox rules)
+            Component::AnnotationAssertion(_) => {}
+            Component::SameIndividual(_)
+            | Component::DifferentIndividuals(_)
+            | Component::ClassAssertion(_)
+            | Component::ObjectPropertyAssertion(_)
+            | Component::NegativeObjectPropertyAssertion(_)
+            | Component::DataPropertyAssertion(_)
+            | Component::NegativeDataPropertyAssertion(_) => {}
+
+            // Deferred
             Component::Import(_) => {
                 schema
                     .unsupported
-                    .insert("owl:imports are not implemented in Phase 1".to_string());
+                    .insert("owl:imports not yet implemented".to_string());
             }
-            Component::DataPropertyRange(_) => {
+            Component::DataPropertyRange(_)
+            | Component::DisjointDataProperties(_)
+            | Component::DatatypeDefinition { .. } => {
+                schema.unsupported.insert(
+                    "data property restrictions deferred to a later phase".to_string(),
+                );
+            }
+            Component::ReflexiveObjectProperty(_)
+            | Component::IrreflexiveObjectProperty(_)
+            | Component::AsymmetricObjectProperty(_) => {
+                schema.unsupported.insert(
+                    "ReflexiveObjectProperty/IrreflexiveObjectProperty/AsymmetricObjectProperty not yet implemented".to_string(),
+                );
+            }
+            Component::HasKey { .. } => {
                 schema
                     .unsupported
-                    .insert("DataPropertyRange is not implemented in Phase 1".to_string());
+                    .insert("owl:HasKey not yet implemented".to_string());
             }
-            component => {
-                schema.unsupported.insert(format!(
-                    "{} is not implemented in Phase 1",
-                    component_kind_name(component)
-                ));
+            Component::Rule(_) => {
+                schema
+                    .unsupported
+                    .insert("SWRL rules deferred to Phase 3".to_string());
             }
         }
+    }
+}
+
+/// Decompose a SubClassOf axiom, handling anonymous class expressions in
+/// either the sub or super position.
+fn lower_subclass_of(
+    sub: &ClassExpression<RcStr>,
+    sup: &ClassExpression<RcStr>,
+    dictionary: &mut Dictionary,
+    schema: &mut RawSchema,
+) {
+    match (sub, sup) {
+        // Both named: simple subClassOf
+        (ClassExpression::Class(sub_c), ClassExpression::Class(sup_c)) => {
+            let sub_id = dictionary.encode_iri(sub_c.as_ref());
+            let sup_id = dictionary.encode_iri(sup_c.as_ref());
+            schema.subclasses.insert((sub_id, sup_id));
+        }
+
+        // Named sub, anonymous super
+        (ClassExpression::Class(sub_c), _) => {
+            let sub_id = dictionary.encode_iri(sub_c.as_ref());
+            lower_named_sub_anon_super(sub_id, sup, dictionary, schema);
+        }
+
+        // Anonymous sub, named super
+        (_, ClassExpression::Class(sup_c)) => {
+            let sup_id = dictionary.encode_iri(sup_c.as_ref());
+            lower_anon_sub_named_super(sub, sup_id, dictionary, schema);
+        }
+
+        // Both anonymous — not handled
+        _ => {
+            schema
+                .unsupported
+                .insert("SubClassOf with both sub and super anonymous".to_string());
+        }
+    }
+}
+
+/// SubClassOf(Named(A), expr) — decompose the anonymous superclass.
+fn lower_named_sub_anon_super(
+    sub_id: TermId,
+    sup: &ClassExpression<RcStr>,
+    dictionary: &mut Dictionary,
+    schema: &mut RawSchema,
+) {
+    match sup {
+        ClassExpression::Class(c) => {
+            let sup_id = dictionary.encode_iri(c.as_ref());
+            schema.subclasses.insert((sub_id, sup_id));
+        }
+        // A ⊆ C1 ∩ C2 ∩ ... → A ⊆ Ci for each
+        ClassExpression::ObjectIntersectionOf(conjuncts) => {
+            for conjunct in conjuncts {
+                lower_named_sub_anon_super(sub_id, conjunct, dictionary, schema);
+            }
+        }
+        // A ⊆ ∀P.B → allValuesFrom(A, P, B)
+        ClassExpression::ObjectAllValuesFrom { ope, bce } => {
+            if let (Ok(prop), Ok(filler)) = (
+                encode_named_object_property(ope, dictionary),
+                encode_named_class(bce, dictionary),
+            ) {
+                schema.all_values_from.push((sub_id, prop, filler));
+            } else {
+                schema.unsupported.insert(
+                    "AllValuesFrom with inverse property or anonymous filler class".to_string(),
+                );
+            }
+        }
+        // A ⊆ ∃P.{v} → has_value_sub(A, P, v) (cls-hv2: type(x,A) → property(x,P,v))
+        ClassExpression::ObjectHasValue { ope, i } => {
+            if let (Ok(prop), Ok(val)) = (
+                encode_named_object_property(ope, dictionary),
+                encode_individual(i, dictionary),
+            ) {
+                schema.has_value_sub.push((sub_id, prop, val));
+            } else {
+                schema.unsupported.insert(
+                    "HasValue with inverse property or anonymous individual".to_string(),
+                );
+            }
+        }
+        // A ⊆ MaxCard(n, P, C)
+        ClassExpression::ObjectMaxCardinality { n, ope, bce } => {
+            if let Ok(prop) = encode_named_object_property(ope, dictionary) {
+                let filler = encode_named_class(bce, dictionary).ok();
+                match n {
+                    0 => schema.max_card_zero.push((sub_id, prop, filler)),
+                    1 => schema.max_card_one.push((sub_id, prop, filler)),
+                    _ => {} // MaxCard ≥ 2 has no RL inference
+                }
+            } else {
+                schema.unsupported.insert(
+                    "ObjectMaxCardinality with inverse property expression".to_string(),
+                );
+            }
+        }
+        // A ⊆ ¬D → complementOf(A, D) for inconsistency detection
+        ClassExpression::ObjectComplementOf(bce) => {
+            if let Ok(comp) = encode_named_class(bce, dictionary) {
+                schema.complement_of.insert((sub_id, comp));
+            } else {
+                schema.unsupported.insert(
+                    "ObjectComplementOf with anonymous filler class".to_string(),
+                );
+            }
+        }
+        // Not useful for RL in this direction
+        ClassExpression::ObjectSomeValuesFrom { .. }
+        | ClassExpression::ObjectUnionOf(_)
+        | ClassExpression::ObjectOneOf(_)
+        | ClassExpression::ObjectHasSelf(_)
+        | ClassExpression::ObjectMinCardinality { .. }
+        | ClassExpression::ObjectExactCardinality { .. } => {}
+        // Data property restrictions deferred
+        ClassExpression::DataSomeValuesFrom { .. }
+        | ClassExpression::DataAllValuesFrom { .. }
+        | ClassExpression::DataHasValue { .. }
+        | ClassExpression::DataMinCardinality { .. }
+        | ClassExpression::DataMaxCardinality { .. }
+        | ClassExpression::DataExactCardinality { .. } => {}
+    }
+}
+
+/// SubClassOf(expr, Named(C)) — decompose the anonymous subclass.
+fn lower_anon_sub_named_super(
+    sub: &ClassExpression<RcStr>,
+    sup_id: TermId,
+    dictionary: &mut Dictionary,
+    schema: &mut RawSchema,
+) {
+    match sub {
+        ClassExpression::Class(c) => {
+            let sub_id = dictionary.encode_iri(c.as_ref());
+            schema.subclasses.insert((sub_id, sup_id));
+        }
+        // C1 ∩ C2 ∩ ... ⊆ C → intersectionOf(C, [C1,...])
+        ClassExpression::ObjectIntersectionOf(conjuncts) => {
+            let conjunct_ids: Vec<TermId> = conjuncts
+                .iter()
+                .filter_map(|ce| encode_named_class(ce, dictionary).ok())
+                .collect();
+            if conjunct_ids.len() == conjuncts.len() && conjunct_ids.len() >= 2 {
+                schema.intersection_of.push((sup_id, conjunct_ids));
+            } else {
+                schema.unsupported.insert(
+                    "IntersectionOf subclass with anonymous conjunct classes".to_string(),
+                );
+            }
+        }
+        // C1 ∪ C2 ∪ ... ⊆ C → SubClassOf(Ci, C) for each
+        ClassExpression::ObjectUnionOf(disjuncts) => {
+            for disjunct in disjuncts {
+                lower_anon_sub_named_super(disjunct, sup_id, dictionary, schema);
+            }
+        }
+        // ∃P.D ⊆ C → someValuesFrom(C, P, D)
+        ClassExpression::ObjectSomeValuesFrom { ope, bce } => {
+            if let (Ok(prop), Ok(filler)) = (
+                encode_named_object_property(ope, dictionary),
+                encode_named_class(bce, dictionary),
+            ) {
+                schema.some_values_from.push((sup_id, prop, filler));
+            } else {
+                schema.unsupported.insert(
+                    "SomeValuesFrom with inverse property or anonymous filler class".to_string(),
+                );
+            }
+        }
+        // ∃P.{v} ⊆ C → has_value_super(C, P, v) (cls-hv1: property(x,P,v) → type(x,C))
+        ClassExpression::ObjectHasValue { ope, i } => {
+            if let (Ok(prop), Ok(val)) = (
+                encode_named_object_property(ope, dictionary),
+                encode_individual(i, dictionary),
+            ) {
+                schema.has_value_super.push((sup_id, prop, val));
+            } else {
+                schema.unsupported.insert(
+                    "HasValue with inverse property or anonymous individual".to_string(),
+                );
+            }
+        }
+        // {a1,...,an} ⊆ C → type(ai, C) for each named individual
+        ClassExpression::ObjectOneOf(individuals) => {
+            let mut any_encoded = false;
+            for ind in individuals {
+                if let Ok(ind_id) = encode_individual(ind, dictionary) {
+                    schema.one_of_types.push((ind_id, sup_id));
+                    any_encoded = true;
+                }
+            }
+            if !any_encoded {
+                schema.unsupported.insert(
+                    "ObjectOneOf with only anonymous individuals".to_string(),
+                );
+            }
+        }
+        // Not useful for RL in this direction
+        ClassExpression::ObjectAllValuesFrom { .. }
+        | ClassExpression::ObjectComplementOf(_)
+        | ClassExpression::ObjectHasSelf(_)
+        | ClassExpression::ObjectMinCardinality { .. }
+        | ClassExpression::ObjectMaxCardinality { .. }
+        | ClassExpression::ObjectExactCardinality { .. } => {}
+        // Data property restrictions deferred
+        ClassExpression::DataSomeValuesFrom { .. }
+        | ClassExpression::DataAllValuesFrom { .. }
+        | ClassExpression::DataHasValue { .. }
+        | ClassExpression::DataMinCardinality { .. }
+        | ClassExpression::DataMaxCardinality { .. }
+        | ClassExpression::DataExactCardinality { .. } => {}
+    }
+}
+
+fn encode_individual(
+    individual: &Individual<RcStr>,
+    dictionary: &mut Dictionary,
+) -> std::result::Result<TermId, ()> {
+    match individual {
+        Individual::Named(ni) => Ok(dictionary.encode_iri(ni.as_ref())),
+        Individual::Anonymous(_) => Err(()),
     }
 }
 
@@ -526,21 +946,6 @@ fn encode_named_object_property(
     }
 }
 
-fn encode_named_subobject_property(
-    expression: &SubObjectPropertyExpression<RcStr>,
-    dictionary: &mut Dictionary,
-) -> std::result::Result<TermId, ()> {
-    match expression {
-        SubObjectPropertyExpression::ObjectPropertyExpression(expression) => {
-            encode_named_object_property(expression, dictionary)
-        }
-        SubObjectPropertyExpression::ObjectPropertyChain(_) => Err(()),
-    }
-}
-
-fn component_kind_name(component: &Component<RcStr>) -> String {
-    format!("{:?}", component.kind()).replace("ComponentKind::", "")
-}
 
 #[cfg(test)]
 mod tests {
