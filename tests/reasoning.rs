@@ -1395,6 +1395,169 @@ SubClassOf(:A :B)
     assert_eq!(count_triples(&inferred), 3, "each instance inferred independently: {inferred}");
 }
 
+// ─── Property chains (Step 5) ─────────────────────────────────────────────
+
+#[test]
+fn property_chain_basic() {
+    // chain(hasParent, hasSibling) → hasUncle
+    let inferred = reason(
+        "\
+<http://x.com/alice> <http://x.com/hasParent> <http://x.com/bob> .
+<http://x.com/bob> <http://x.com/hasSibling> <http://x.com/charlie> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:hasParent))
+Declaration(ObjectProperty(:hasSibling))
+Declaration(ObjectProperty(:hasUncle))
+SubObjectPropertyOf(ObjectPropertyChain(:hasParent :hasSibling) :hasUncle)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/alice> <http://x.com/hasUncle> <http://x.com/charlie> ."));
+    assert_eq!(count_triples(&inferred), 1, "basic chain: {inferred}");
+}
+
+#[test]
+fn property_chain_no_fire_without_match() {
+    // chain(hasParent, hasSibling) → hasUncle, but data has hasSibling then hasParent (wrong order)
+    let inferred = reason(
+        "\
+<http://x.com/alice> <http://x.com/hasSibling> <http://x.com/bob> .
+<http://x.com/bob> <http://x.com/hasParent> <http://x.com/charlie> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:hasParent))
+Declaration(ObjectProperty(:hasSibling))
+Declaration(ObjectProperty(:hasUncle))
+SubObjectPropertyOf(ObjectPropertyChain(:hasParent :hasSibling) :hasUncle)
+)",
+    );
+    assert_eq!(count_triples(&inferred), 0, "wrong order should not fire chain: {inferred}");
+}
+
+#[test]
+fn property_chain_recursive() {
+    // chain(linksTo, extends) → linksTo — super property is in the chain
+    // a linksTo b, b extends c → a linksTo c
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://x.com/linksTo> <http://x.com/b> .
+<http://x.com/b> <http://x.com/extends> <http://x.com/c> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:linksTo))
+Declaration(ObjectProperty(:extends))
+SubObjectPropertyOf(ObjectPropertyChain(:linksTo :extends) :linksTo)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/linksTo> <http://x.com/c> ."));
+    assert_eq!(count_triples(&inferred), 1, "recursive chain: {inferred}");
+}
+
+#[test]
+fn property_chain_recursive_multi_hop() {
+    // chain(linksTo, extends) → linksTo fires iteratively:
+    // a linksTo b, b extends c, c extends d → a linksTo c (iter 1) → a linksTo d (iter 2)
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://x.com/linksTo> <http://x.com/b> .
+<http://x.com/b> <http://x.com/extends> <http://x.com/c> .
+<http://x.com/c> <http://x.com/extends> <http://x.com/d> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:linksTo))
+Declaration(ObjectProperty(:extends))
+SubObjectPropertyOf(ObjectPropertyChain(:linksTo :extends) :linksTo)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/linksTo> <http://x.com/c> ."));
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/linksTo> <http://x.com/d> ."));
+    assert_eq!(count_triples(&inferred), 2, "recursive multi-hop chain: {inferred}");
+}
+
+#[test]
+fn property_chain_length_three() {
+    // chain(p1, p2, p3) → r
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://x.com/p1> <http://x.com/b> .
+<http://x.com/b> <http://x.com/p2> <http://x.com/c> .
+<http://x.com/c> <http://x.com/p3> <http://x.com/d> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p1))
+Declaration(ObjectProperty(:p2))
+Declaration(ObjectProperty(:p3))
+Declaration(ObjectProperty(:r))
+SubObjectPropertyOf(ObjectPropertyChain(:p1 :p2 :p3) :r)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/r> <http://x.com/d> ."));
+    assert_eq!(count_triples(&inferred), 1, "length-3 chain: {inferred}");
+}
+
+#[test]
+fn self_join_chain_normalized_to_transitive() {
+    // chain(p, p) → p should behave identically to TransitiveProperty(p)
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://x.com/p> <http://x.com/b> .
+<http://x.com/b> <http://x.com/p> <http://x.com/c> .
+<http://x.com/c> <http://x.com/p> <http://x.com/d> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+SubObjectPropertyOf(ObjectPropertyChain(:p :p) :p)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/p> <http://x.com/c> ."));
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/p> <http://x.com/d> ."));
+    assert!(inferred.contains("<http://x.com/b> <http://x.com/p> <http://x.com/d> ."));
+    assert_eq!(count_triples(&inferred), 3, "self-join chain as transitive: {inferred}");
+}
+
+#[test]
+fn chain_plus_domain_interaction() {
+    // chain(p1, p2) → r, domain(r) = C
+    // a p1 b, b p2 c → a r c → type(a, C)
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://x.com/p1> <http://x.com/b> .
+<http://x.com/b> <http://x.com/p2> <http://x.com/c> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p1))
+Declaration(ObjectProperty(:p2))
+Declaration(ObjectProperty(:r))
+Declaration(Class(:C))
+SubObjectPropertyOf(ObjectPropertyChain(:p1 :p2) :r)
+ObjectPropertyDomain(:r :C)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/a> <http://x.com/r> <http://x.com/c> ."));
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> ."));
+}
+
 // ─── Class restriction rules (Step 4) ────────────────────────────────────────
 
 #[test]

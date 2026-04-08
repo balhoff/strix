@@ -105,7 +105,6 @@ fn reason_expect_inconsistency(data: &str, ontology: &str) -> bool {
 /// :agent1 :memberOf :org1 . :org1 :locatedIn :city1 .
 /// ⊨ :agent1 :basedIn :city1 .
 #[test]
-#[ignore = "Step 5: property chains not yet implemented"]
 fn w3c_object_property_chain_001() {
     let inferred = reason(
         "\
@@ -137,7 +136,6 @@ SubObjectPropertyOf(ObjectPropertyChain(:memberOf :locatedIn) :basedIn)
 /// :a :linksTo :b . :b :extends :c .
 /// ⊨ :a :linksTo :c .
 #[test]
-#[ignore = "Step 5: property chains not yet implemented"]
 fn w3c_object_property_chain_bjp_003() {
     let inferred = reason(
         "\
@@ -167,7 +165,6 @@ SubObjectPropertyOf(ObjectPropertyChain(:linksTo :extends) :linksTo)
 /// :a :extends :b . :b :extends :c .
 /// ⊭ :a :linksTo :c   (no :linksTo assertions in data, chain cannot fire)
 #[test]
-#[ignore = "Step 5: property chains not yet implemented"]
 fn w3c_object_property_chain_bjp_004_negative() {
     let inferred = reason(
         "\

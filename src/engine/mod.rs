@@ -337,6 +337,48 @@ fn apply_property_join_rules(
         }
     }
 
+    // Property chains: delta(x, p_i, y) → walk backward/forward to complete chain
+    if let Some(triggers) = schema.chain_triggers.get(&predicate) {
+        for &(chain_idx, pos) in triggers {
+            let (super_prop, chain) = &schema.property_chains[chain_idx];
+
+            // Walk backward through positions 0..pos to collect chain start nodes
+            let mut starts = vec![subject];
+            for &pred in chain[..pos].iter().rev() {
+                let mut next = Vec::new();
+                for &node in &starts {
+                    next.extend_from_slice(indexes.properties.subjects_for(pred, node));
+                }
+                starts = next;
+                if starts.is_empty() {
+                    break;
+                }
+            }
+            if starts.is_empty() {
+                continue;
+            }
+
+            // Walk forward through positions pos+1..n to collect chain end nodes
+            let mut ends = vec![object];
+            for &pred in &chain[pos + 1..] {
+                let mut next = Vec::new();
+                for &node in &ends {
+                    next.extend_from_slice(indexes.properties.objects_for(pred, node));
+                }
+                ends = next;
+                if ends.is_empty() {
+                    break;
+                }
+            }
+
+            for &s in &starts {
+                for &e in &ends {
+                    candidate_properties.push((s, *super_prop, e))?;
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

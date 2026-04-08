@@ -17,6 +17,10 @@ pub struct CompiledSchema {
     pub inverses: BTreeMap<TermId, Vec<TermId>>,
     pub symmetric_properties: BTreeSet<TermId>,
     pub transitive_properties: BTreeSet<TermId>,
+    /// (super_property, [chain_predicates]) — non-transitive property chains
+    pub property_chains: Vec<(TermId, Vec<TermId>)>,
+    /// pred → [(chain_index, position)] — which chains fire on this predicate
+    pub chain_triggers: BTreeMap<TermId, Vec<(usize, usize)>>,
 
     // owl:Thing-derived rules
     /// Classes every individual belongs to (from SubClassOf(owl:Thing, C)).
@@ -199,9 +203,28 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
         .filter(|&(_, cls)| cls != owl_thing)
         .collect();
 
+    // Property chains: normalize self-join chains [p,p,...] → p to transitive
+    let mut transitive_properties = schema.transitive_properties.clone();
+    let mut property_chains: Vec<(TermId, Vec<TermId>)> = Vec::new();
+    let mut chain_triggers: BTreeMap<TermId, Vec<(usize, usize)>> = BTreeMap::new();
+    for (super_prop, chain) in &schema.property_chains {
+        if chain.iter().all(|&p| p == *super_prop) {
+            transitive_properties.insert(*super_prop);
+        } else {
+            let idx = property_chains.len();
+            for (pos, &pred) in chain.iter().enumerate() {
+                chain_triggers.entry(pred).or_default().push((idx, pos));
+            }
+            property_chains.push((*super_prop, chain.clone()));
+        }
+    }
+
     // Predicates needing in-memory indexing for join-based rules.
     // Built from filtered lookup tables so owl:Thing-only entries are excluded.
-    let mut indexed_predicates = schema.transitive_properties.clone();
+    let mut indexed_predicates = transitive_properties.clone();
+    for (_, chain) in &property_chains {
+        indexed_predicates.extend(chain);
+    }
     indexed_predicates.extend(some_values_from_by_prop.keys());
     indexed_predicates.extend(all_values_from_by_prop.keys());
 
@@ -218,7 +241,9 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
         ranges: to_map(&filtered_ranges),
         inverses: to_map(&schema.inverse_properties),
         symmetric_properties: schema.symmetric_properties.clone(),
-        transitive_properties: schema.transitive_properties.clone(),
+        transitive_properties,
+        property_chains,
+        chain_triggers,
         universal_types,
         svf_thing_by_prop,
         has_value_by_prop,

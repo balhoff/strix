@@ -26,6 +26,12 @@ When `universal_types` is non-empty (from `SubClassOf(owl:Thing, C)`), every ind
 
 **Impact**: Reduces per-iteration overhead linearly with store size. Requires the index to persist across iterations and careful handling of new derived entries.
 
+## Engine: reuse buffers in property chain walks
+
+`apply_property_join_rules` allocates fresh `Vec`s for each step of the backward/forward chain walk, and for each chain trigger on each delta fact. Pre-allocated reusable buffers (e.g. two `Vec<TermId>` passed in or held in `JoinIndexes`) would eliminate per-walk heap allocations.
+
+**Impact**: Property chains are pervasive in biomedical ontologies, making this a hot path in practice. For length-2 chains each walk is 0-1 steps, but the per-delta allocation cost adds up with large delta sets and many chain triggers.
+
 ## Store: unify BinaryRelation and TernaryRelation via generic Relation\<T\>
 
 ~100 lines of near-identical code between `BinaryRelation` and `TernaryRelation`. Could be unified into `Relation<T>` parameterized over tuple type, with a trait for serialization.

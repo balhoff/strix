@@ -73,7 +73,7 @@ strix reason data.nt -O ontology.ofn -o inferred.nt --report report.json
 | EquivalentClasses | supported (decomposed to mutual SubClassOf) |
 | DisjointClasses | parsed, enforcement deferred |
 | DisjointUnion | parsed (union decomposed to SubClassOf, pairwise disjointness deferred) |
-| SubObjectPropertyOf | supported (including property chains, parsed but not yet evaluated) |
+| SubObjectPropertyOf | supported (including property chains) |
 | EquivalentObjectProperties | supported (decomposed to mutual SubPropertyOf) |
 | DisjointObjectProperties | parsed, enforcement deferred |
 | InverseObjectProperties | supported |
@@ -120,7 +120,6 @@ strix reason data.nt -O ontology.ofn -o inferred.nt --report report.json
 | Construct | Notes |
 |---|---|
 | owl:sameAs / equality | Deferred (FunctionalProperty, InverseFunctionalProperty, MaxCardinality 1) |
-| Property chains | Parsed but evaluation not yet implemented |
 | Inconsistency detection | DisjointClasses, ComplementOf, MaxCardinality 0, DisjointProperties |
 | IrreflexiveObjectProperty | Deferred |
 | AsymmetricObjectProperty | Deferred |
