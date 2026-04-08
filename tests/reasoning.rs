@@ -2046,6 +2046,174 @@ SubClassOf(ObjectIntersectionOf(:Dog owl:Thing) :GoodDog)
     assert_eq!(count_triples(&inferred), 1, "intersection with owl:Thing conjunct removed: {inferred}");
 }
 
+// ─── owl:sameAs / equality rules (Step 6) ─────────────────────────────────
+
+#[test]
+fn functional_property_basic() {
+    // FunctionalProperty(hasMother): alice hasMother beth, alice hasMother elizabeth
+    // → beth sameAs elizabeth
+    let inferred = reason(
+        "\
+<http://x.com/alice> <http://x.com/hasMother> <http://x.com/beth> .
+<http://x.com/alice> <http://x.com/hasMother> <http://x.com/elizabeth> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:hasMother))
+FunctionalObjectProperty(:hasMother)
+)",
+    );
+    assert!(
+        inferred.contains("<http://www.w3.org/2002/07/owl#sameAs>"),
+        "should produce sameAs: {inferred}"
+    );
+    // Both directions of sameAs
+    assert!(inferred.contains("<http://x.com/beth> <http://www.w3.org/2002/07/owl#sameAs> <http://x.com/elizabeth> ."));
+    assert!(inferred.contains("<http://x.com/elizabeth> <http://www.w3.org/2002/07/owl#sameAs> <http://x.com/beth> ."));
+}
+
+#[test]
+fn inverse_functional_property_basic() {
+    // InverseFunctionalProperty(hasSSN): alice hasSSN x, bob hasSSN x
+    // → alice sameAs bob
+    let inferred = reason(
+        "\
+<http://x.com/alice> <http://x.com/hasSSN> <http://x.com/ssn1> .
+<http://x.com/bob> <http://x.com/hasSSN> <http://x.com/ssn1> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:hasSSN))
+InverseFunctionalObjectProperty(:hasSSN)
+)",
+    );
+    assert!(
+        inferred.contains("<http://www.w3.org/2002/07/owl#sameAs>"),
+        "should produce sameAs: {inferred}"
+    );
+    assert!(inferred.contains("<http://x.com/alice> <http://www.w3.org/2002/07/owl#sameAs> <http://x.com/bob> .")
+        || inferred.contains("<http://x.com/bob> <http://www.w3.org/2002/07/owl#sameAs> <http://x.com/alice> ."));
+}
+
+#[test]
+fn functional_property_type_propagation() {
+    // FunctionalProperty(hasMother), type(beth, Human)
+    // alice hasMother beth, alice hasMother elizabeth
+    // → beth sameAs elizabeth → type(elizabeth, Human) (via canonical rewrite)
+    let inferred = reason(
+        "\
+<http://x.com/alice> <http://x.com/hasMother> <http://x.com/beth> .
+<http://x.com/alice> <http://x.com/hasMother> <http://x.com/elizabeth> .
+<http://x.com/beth> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Human> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:hasMother))
+Declaration(Class(:Human))
+FunctionalObjectProperty(:hasMother)
+)",
+    );
+    // elizabeth should get type Human through canonical rewrite
+    assert!(
+        inferred.contains("<http://x.com/elizabeth> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Human> ."),
+        "type should propagate through sameAs: {inferred}"
+    );
+}
+
+#[test]
+fn max_cardinality_one_basic() {
+    // SubClassOf(Person, MaxCardinality(1, hasMother))
+    // type(alice, Person), alice hasMother beth, alice hasMother elizabeth
+    // → beth sameAs elizabeth
+    let inferred = reason(
+        "\
+<http://x.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Person> .
+<http://x.com/alice> <http://x.com/hasMother> <http://x.com/beth> .
+<http://x.com/alice> <http://x.com/hasMother> <http://x.com/elizabeth> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:hasMother))
+Declaration(Class(:Person))
+SubClassOf(:Person ObjectMaxCardinality(1 :hasMother))
+)",
+    );
+    assert!(
+        inferred.contains("<http://www.w3.org/2002/07/owl#sameAs>"),
+        "MaxCard(1) should produce sameAs: {inferred}"
+    );
+}
+
+#[test]
+fn asserted_sameas_propagates_types() {
+    // a sameAs b, type(a, C) → type(b, C) via equality expansion
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://www.w3.org/2002/07/owl#sameAs> <http://x.com/b> .
+<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:C))
+)",
+    );
+    assert!(
+        inferred.contains("<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> ."),
+        "type should propagate through asserted sameAs: {inferred}"
+    );
+}
+
+#[test]
+fn asserted_sameas_propagates_properties() {
+    // a sameAs b, property(a, p, c) → property(b, p, c) via equality expansion
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://www.w3.org/2002/07/owl#sameAs> <http://x.com/b> .
+<http://x.com/a> <http://x.com/p> <http://x.com/c> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+)",
+    );
+    assert!(
+        inferred.contains("<http://x.com/b> <http://x.com/p> <http://x.com/c> ."),
+        "property should propagate through asserted sameAs: {inferred}"
+    );
+}
+
+#[test]
+fn functional_property_no_equality_without_conflict() {
+    // FunctionalProperty(hasMother): alice hasMother beth (only one value)
+    // → no sameAs produced
+    let inferred = reason(
+        "<http://x.com/alice> <http://x.com/hasMother> <http://x.com/beth> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:hasMother))
+FunctionalObjectProperty(:hasMother)
+)",
+    );
+    assert!(
+        !inferred.contains("sameAs"),
+        "no equality conflict, no sameAs: {inferred}"
+    );
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn write(path: &Path, content: &str) {

@@ -479,6 +479,62 @@ fn w3c_anonymous_individual_consistency() {
 // Equality / sameAs Tests
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Derived from W3C: New-Feature-FunctionalProperty-001
+///
+/// FunctionalObjectProperty(:hasMother)
+/// :alice :hasMother :beth . :alice :hasMother :elizabeth .
+/// ⊨ SameIndividual(:beth :elizabeth)
+#[test]
+fn w3c_functional_property_001() {
+    let inferred = reason(
+        "\
+<http://example.org/alice> <http://example.org/hasMother> <http://example.org/beth> .
+<http://example.org/alice> <http://example.org/hasMother> <http://example.org/elizabeth> .
+",
+        "\
+Prefix(:=<http://example.org/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://example.org/ontology>
+Declaration(ObjectProperty(:hasMother))
+FunctionalObjectProperty(:hasMother)
+)",
+    );
+    assert!(
+        inferred.contains("<http://www.w3.org/2002/07/owl#sameAs>"),
+        "functional property should produce sameAs: {inferred}"
+    );
+    assert!(
+        inferred.contains("<http://example.org/beth>")&& inferred.contains("<http://example.org/elizabeth>"),
+        "both individuals should appear in sameAs: {inferred}"
+    );
+}
+
+/// Derived from W3C: New-Feature-InverseFunctionalProperty-001
+///
+/// InverseFunctionalObjectProperty(:hasSSN)
+/// :alice :hasSSN :ssn1 . :bob :hasSSN :ssn1 .
+/// ⊨ SameIndividual(:alice :bob)
+#[test]
+fn w3c_inverse_functional_property_001() {
+    let inferred = reason(
+        "\
+<http://example.org/alice> <http://example.org/hasSSN> <http://example.org/ssn1> .
+<http://example.org/bob> <http://example.org/hasSSN> <http://example.org/ssn1> .
+",
+        "\
+Prefix(:=<http://example.org/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://example.org/ontology>
+Declaration(ObjectProperty(:hasSSN))
+InverseFunctionalObjectProperty(:hasSSN)
+)",
+    );
+    assert!(
+        inferred.contains("<http://www.w3.org/2002/07/owl#sameAs>"),
+        "IFP should produce sameAs: {inferred}"
+    );
+}
+
 /// Derived from W3C: New-Feature-Keys-003
 ///
 /// HasKey(:RegisteredVehicle () (:hasVIN))

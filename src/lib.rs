@@ -153,6 +153,7 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
         &compiled_schema,
         args.max_iterations,
         engine_budget,
+        well_known.owl_same_as,
     )?;
     let reasoning_time_ms = reasoning_timer.elapsed_ms();
 
@@ -194,6 +195,8 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
                 total_inferred: reasoning_stats.total_inferred(),
                 total_iterations: compiled_schema.schema_iterations + reasoning_stats.iterations,
                 fixpoint_reached: reasoning_stats.fixpoint_reached,
+                equality_merges: reasoning_stats.equality_merges,
+                equality_iterations: reasoning_stats.equality_iterations,
             },
             peak_rss_bytes: if benchmark {
                 bench::peak_rss_bytes()

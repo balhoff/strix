@@ -77,8 +77,8 @@ strix reason data.nt -O ontology.ofn -o inferred.nt --report report.json
 | EquivalentObjectProperties | supported (decomposed to mutual SubPropertyOf) |
 | DisjointObjectProperties | parsed, enforcement deferred |
 | InverseObjectProperties | supported |
-| FunctionalObjectProperty | parsed, equality production deferred |
-| InverseFunctionalObjectProperty | parsed, equality production deferred |
+| FunctionalObjectProperty | supported (equality via owl:sameAs) |
+| InverseFunctionalObjectProperty | supported (equality via owl:sameAs) |
 | SymmetricObjectProperty | supported |
 | TransitiveObjectProperty | supported |
 | ObjectPropertyDomain | supported |
@@ -86,7 +86,7 @@ strix reason data.nt -O ontology.ofn -o inferred.nt --report report.json
 | SubDataPropertyOf | supported |
 | EquivalentDataProperties | supported (decomposed to mutual SubPropertyOf) |
 | DataPropertyDomain | supported |
-| FunctionalDataProperty | parsed, equality production deferred |
+| FunctionalDataProperty | supported (equality via owl:sameAs) |
 | SubAnnotationPropertyOf | supported (unless `--ignore-annotation-axioms`) |
 | AnnotationPropertyDomain/Range | supported (unless `--ignore-annotation-axioms`) |
 
@@ -112,14 +112,13 @@ strix reason data.nt -O ontology.ofn -o inferred.nt --report report.json
 | ObjectAllValuesFrom | supported (cls-avf: all property successors get the filler type) |
 | ObjectHasValue | supported (cls-hv2: class membership implies property assertion) |
 | ObjectMaxCardinality 0 | parsed, inconsistency detection deferred |
-| ObjectMaxCardinality 1 | parsed, equality production deferred |
+| ObjectMaxCardinality 1 | supported (equality via owl:sameAs) |
 | ObjectComplementOf | parsed, inconsistency detection deferred |
 
 ### Not yet implemented
 
 | Construct | Notes |
 |---|---|
-| owl:sameAs / equality | Deferred (FunctionalProperty, InverseFunctionalProperty, MaxCardinality 1) |
 | Inconsistency detection | DisjointClasses, ComplementOf, MaxCardinality 0, DisjointProperties |
 | IrreflexiveObjectProperty | Deferred |
 | AsymmetricObjectProperty | Deferred |
@@ -147,6 +146,11 @@ The reasoning pipeline has four stages:
    facts, and feeds new deltas into the next round. Join-based rules
    (transitive properties, class restrictions) use in-memory indexes
    filtered to only the predicates and classes that participate in joins.
+   An outer equality fixpoint wraps the inner loop: after convergence,
+   equality-producing rules (FunctionalProperty, InverseFunctionalProperty,
+   MaxCardinality 1, asserted owl:sameAs) are evaluated via a union-find.
+   New equalities trigger fact expansion across equivalence classes and
+   another inner fixpoint pass.
 4. **Export** -- Serialize inferred (or full closure) triples as N-Triples.
 
 Memory is bounded by a configurable budget. Relations spill to disk as

@@ -47,6 +47,14 @@ pub struct CompiledSchema {
     /// conjunct → [intersection_classes] — cls-int1: check all conjuncts → type(x,C)
     pub conjunct_of: BTreeMap<TermId, Vec<TermId>>,
 
+    // Equality-producing rules (Phase 2, Step 6)
+    pub functional_properties: BTreeSet<TermId>,
+    pub inverse_functional_properties: BTreeSet<TermId>,
+    /// (class, prop, opt_filler) — SubClassOf(A, MaxCard(1,P,C))
+    pub max_card_one: Vec<(TermId, TermId, Option<TermId>)>,
+    /// prop → [(class, opt_filler)] — max_card_one indexed by predicate
+    pub max_card_one_by_prop: BTreeMap<TermId, Vec<(TermId, Option<TermId>)>>,
+
     /// Predicates that require in-memory indexing for join evaluation.
     pub indexed_predicates: BTreeSet<TermId>,
     /// Classes that require in-memory indexing for join evaluation.
@@ -219,6 +227,20 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
         }
     }
 
+    // MaxCardinality 1: normalize owl:Thing filler to None (unqualified).
+    let max_card_one: Vec<(TermId, TermId, Option<TermId>)> = schema
+        .max_card_one
+        .iter()
+        .map(|&(cls, prop, filler)| (cls, prop, filler.filter(|&f| f != owl_thing)))
+        .collect();
+    let mut max_card_one_by_prop: BTreeMap<TermId, Vec<(TermId, Option<TermId>)>> = BTreeMap::new();
+    for &(cls, prop, filler) in &max_card_one {
+        max_card_one_by_prop
+            .entry(prop)
+            .or_default()
+            .push((cls, filler));
+    }
+
     // Predicates needing in-memory indexing for join-based rules.
     // Built from filtered lookup tables so owl:Thing-only entries are excluded.
     let mut indexed_predicates = transitive_properties.clone();
@@ -254,6 +276,10 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
         all_values_from_by_prop,
         intersection_conjuncts,
         conjunct_of,
+        functional_properties: schema.functional_properties.clone(),
+        inverse_functional_properties: schema.inverse_functional_properties.clone(),
+        max_card_one,
+        max_card_one_by_prop,
         indexed_predicates,
         indexed_classes,
         schema_iterations: subclass_iterations.max(subproperty_iterations),

@@ -32,6 +32,24 @@ When `universal_types` is non-empty (from `SubClassOf(owl:Thing, C)`), every ind
 
 **Impact**: Property chains are pervasive in biomedical ontologies, making this a hot path in practice. For length-2 chains each walk is 0-1 steps, but the per-delta allocation cost adds up with large delta sets and many chain triggers.
 
+## Engine: avoid re-seeding inner fixpoint on equality iterations
+
+On the 2nd+ call to `inner_fixpoint` (after equality expansion), the seed pass re-scans all asserted facts and re-applies non-join rules, even though those were already applied in the first pass. The equality expansion only feeds new candidates — the seed rules generate no new work. Skipping the seed pass on subsequent calls (or passing a flag to suppress it) would avoid this redundant scan.
+
+**Impact**: Proportional to the number of asserted facts × number of equality iterations. Only matters when equality rules fire (FunctionalProperty, InverseFunctionalProperty, MaxCardinality 1, asserted sameAs).
+
+## Engine: O(n²) sameAs triple emission for large equivalence classes
+
+`emit_sameas_triples` generates the full pairwise closure of each equivalence class, which is O(n²) per class. For very large classes (thousands of individuals mapped to the same canonical), this could generate millions of sameAs triples. Emitting only star-shaped sameAs (each member linked to the canonical representative) would be O(n) but technically incomplete for the full pairwise closure.
+
+**Impact**: Only matters when equivalence classes are very large, which is unusual in practice.
+
+## Engine: full property scan on every outer equality iteration
+
+`evaluate_equality_rules` does a full scan of all known properties each outer loop iteration to group FP/IFP/MC1 values. An incremental approach that only re-scans properties whose subject or object gained new equivalents would be more efficient.
+
+**Impact**: Proportional to total known properties × number of equality iterations. Significant only when there are many properties and multiple equality rounds.
+
 ## Store: unify BinaryRelation and TernaryRelation via generic Relation\<T\>
 
 ~100 lines of near-identical code between `BinaryRelation` and `TernaryRelation`. Could be unified into `Relation<T>` parameterized over tuple type, with a trait for serialization.

@@ -33,6 +33,8 @@ pub struct ReasoningReport {
     pub total_inferred: usize,
     pub total_iterations: usize,
     pub fixpoint_reached: bool,
+    pub equality_merges: usize,
+    pub equality_iterations: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -1,3 +1,5 @@
+pub mod sameas;
+
 use std::collections::BTreeMap;
 
 use crate::compile::CompiledSchema;
@@ -14,6 +16,8 @@ pub struct ReasoningStats {
     pub inferred_types: usize,
     pub inferred_properties: usize,
     pub fixpoint_reached: bool,
+    pub equality_merges: usize,
+    pub equality_iterations: usize,
 }
 
 impl ReasoningStats {
@@ -382,6 +386,233 @@ fn apply_property_join_rules(
     Ok(())
 }
 
+// ─── Equality evaluation ───────────────────────────────────────────────────
+
+use sameas::UnionFind;
+use std::collections::HashMap;
+
+/// Scan known facts for equality-producing rule firings.
+///
+/// Handles:
+///   - Asserted owl:sameAs triples
+///   - FunctionalProperty: multiple objects for same (pred, subject) → union
+///   - InverseFunctionalProperty: multiple subjects for same (pred, object) → union
+///   - MaxCardinality 1: type(x,A) ∧ property(x,P,y1) ∧ property(x,P,y2) [∧ type checks] → union
+fn evaluate_equality_rules(
+    store: &mut FactStore,
+    schema: &CompiledSchema,
+    union_find: &mut UnionFind,
+    owl_same_as: TermId,
+) -> Result<usize> {
+    let mut new_equalities = 0usize;
+
+    let has_fp = !schema.functional_properties.is_empty();
+    let has_ifp = !schema.inverse_functional_properties.is_empty();
+    let has_mc1 = !schema.max_card_one.is_empty();
+
+    // Fast path: no schema equality axioms — only scan for asserted sameAs.
+    if !has_fp && !has_ifp && !has_mc1 {
+        for result in store.known_properties_iter()? {
+            let (s, p, o) = result?;
+            if p == owl_same_as && union_find.union(s, o) {
+                new_equalities += 1;
+            }
+        }
+        return Ok(new_equalities);
+    }
+
+    // Build instance → classes map for max_card_one (need to know type membership).
+    let mut instance_classes: BTreeMap<TermId, Vec<TermId>> = BTreeMap::new();
+    if has_mc1 {
+        for result in store.known_types_iter()? {
+            let (inst, cls) = result?;
+            let cinst = union_find.canonical(inst);
+            instance_classes.entry(cinst).or_default().push(cls);
+        }
+        for classes in instance_classes.values_mut() {
+            classes.sort_unstable();
+            classes.dedup();
+        }
+    }
+
+    // Single scan of all known properties: group by (pred, canon_subj) for FP,
+    // by (pred, canon_obj) for IFP, and by (canon_subj, pred) for MC1.
+    let mut fp_groups: BTreeMap<(TermId, TermId), Vec<TermId>> = BTreeMap::new();
+    let mut ifp_groups: BTreeMap<(TermId, TermId), Vec<TermId>> = BTreeMap::new();
+    let mut mc1_groups: BTreeMap<(TermId, TermId), Vec<TermId>> = BTreeMap::new();
+
+    for result in store.known_properties_iter()? {
+        let (s, p, o) = result?;
+
+        // Asserted or inferred owl:sameAs
+        if p == owl_same_as {
+            if union_find.union(s, o) {
+                new_equalities += 1;
+            }
+            continue;
+        }
+
+        let cs = union_find.canonical(s);
+        let co = union_find.canonical(o);
+
+        if has_fp && schema.functional_properties.contains(&p) {
+            fp_groups.entry((p, cs)).or_default().push(co);
+        }
+        if has_ifp && schema.inverse_functional_properties.contains(&p) {
+            ifp_groups.entry((p, co)).or_default().push(cs);
+        }
+        if has_mc1 && schema.max_card_one_by_prop.contains_key(&p) {
+            mc1_groups.entry((cs, p)).or_default().push(co);
+        }
+    }
+
+    // FunctionalProperty: union multiple objects for same (pred, subject)
+    for objects in fp_groups.values() {
+        new_equalities += union_find.union_all(objects);
+    }
+
+    // InverseFunctionalProperty: union multiple subjects for same (pred, object)
+    for subjects in ifp_groups.values() {
+        new_equalities += union_find.union_all(subjects);
+    }
+
+    // MaxCardinality 1: for each (subject, pred) group, check matching axioms via index
+    for (&(subj, pred), objects) in &mc1_groups {
+        if objects.len() <= 1 {
+            continue;
+        }
+        if let Some(axioms) = schema.max_card_one_by_prop.get(&pred) {
+            for &(class, opt_filler) in axioms {
+                // Check if subject is of the required class
+                let has_class = instance_classes
+                    .get(&subj)
+                    .is_some_and(|classes| classes.binary_search(&class).is_ok());
+                if !has_class {
+                    continue;
+                }
+                // Filter objects by filler type if qualified
+                let qualifying: Vec<TermId> = if let Some(filler) = opt_filler {
+                    objects
+                        .iter()
+                        .copied()
+                        .filter(|&o| {
+                            let co = union_find.canonical(o);
+                            instance_classes
+                                .get(&co)
+                                .is_some_and(|classes| classes.binary_search(&filler).is_ok())
+                        })
+                        .collect()
+                } else {
+                    objects.clone()
+                };
+                new_equalities += union_find.union_all(&qualifying);
+            }
+        }
+    }
+
+    Ok(new_equalities)
+}
+
+/// Generate candidate facts by expanding existing facts across all members
+/// of each equivalence class (eq-rep-s, eq-rep-o rules).
+///
+/// For type(x, C) where x has equivalents {x, y, z}: emit type(y, C) and type(z, C).
+/// For property(s, P, o) where s or o have equivalents: emit all combinations.
+fn generate_equality_candidates(
+    store: &mut FactStore,
+    union_find: &mut UnionFind,
+    candidate_types: &mut BinaryRelation,
+    candidate_properties: &mut TernaryRelation,
+) -> Result<()> {
+    let eq_classes = union_find.equivalence_classes();
+    if eq_classes.is_empty() {
+        return Ok(());
+    }
+
+    // Build lookup: term → all members of its equivalence class.
+    let mut members_of: HashMap<TermId, &Vec<TermId>> = HashMap::new();
+    for members in eq_classes.values() {
+        for &m in members {
+            members_of.insert(m, members);
+        }
+    }
+
+    // Expand type facts: type(inst, cls) → type(m, cls) for all m ∈ equiv(inst)
+    for result in store.known_types_iter()? {
+        let (inst, cls) = result?;
+        if let Some(members) = members_of.get(&inst) {
+            for &m in *members {
+                if m != inst {
+                    candidate_types.push((m, cls))?;
+                }
+            }
+        }
+    }
+
+    // Expand property facts across subject and object equivalences.
+    for result in store.known_properties_iter()? {
+        let (s, p, o) = result?;
+        let s_mems = members_of.get(&s).map(|v| v.as_slice());
+        let o_mems = members_of.get(&o).map(|v| v.as_slice());
+
+        match (s_mems, o_mems) {
+            (Some(ss), Some(os)) => {
+                // Both positions have equivalents — cross product.
+                for &sm in ss {
+                    for &om in os {
+                        if sm != s || om != o {
+                            candidate_properties.push((sm, p, om))?;
+                        }
+                    }
+                }
+            }
+            (Some(ss), None) => {
+                for &sm in ss {
+                    if sm != s {
+                        candidate_properties.push((sm, p, o))?;
+                    }
+                }
+            }
+            (None, Some(os)) => {
+                for &om in os {
+                    if om != o {
+                        candidate_properties.push((s, p, om))?;
+                    }
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
+    Ok(())
+}
+
+/// Emit owl:sameAs triples for all non-trivial equivalence classes.
+/// Emits the full pairwise closure: for each class {a, b, c, ...},
+/// emit sameAs(x, y) for all distinct pairs.
+fn emit_sameas_triples(
+    store: &mut FactStore,
+    union_find: &mut UnionFind,
+    owl_same_as: TermId,
+) -> Result<usize> {
+    let classes = union_find.equivalence_classes();
+    let mut count = 0usize;
+    for members in classes.values() {
+        for (i, &x) in members.iter().enumerate() {
+            for &y in &members[i + 1..] {
+                store
+                    .derived_properties_mut()
+                    .push((x, owl_same_as, y))?;
+                store
+                    .derived_properties_mut()
+                    .push((y, owl_same_as, x))?;
+                count += 2;
+            }
+        }
+    }
+    Ok(count)
+}
+
 // ─── Fixpoint loop ──────────────────────────────────────────────────────────
 
 pub fn materialize(
@@ -389,17 +620,80 @@ pub fn materialize(
     schema: &CompiledSchema,
     max_iterations: Option<usize>,
     engine_budget: usize,
+    owl_same_as: TermId,
 ) -> Result<ReasoningStats> {
     let mut stats = ReasoningStats::default();
     let relation_budget = engine_budget / 4;
-    let work_dir = store.work_dir();
+    let work_dir = store.work_dir().to_path_buf();
 
-    let mut candidate_types = BinaryRelation::new(work_dir, "engine-cand-types", relation_budget);
+    let mut candidate_types = BinaryRelation::new(&work_dir, "engine-cand-types", relation_budget);
     let mut candidate_properties =
-        TernaryRelation::new(work_dir, "engine-cand-props", relation_budget);
-    let mut delta_types = BinaryRelation::new(work_dir, "engine-delta-types", relation_budget);
+        TernaryRelation::new(&work_dir, "engine-cand-props", relation_budget);
+    let mut union_find = UnionFind::new();
+
+    // Outer equality fixpoint: run inner fixpoint, check for new equalities
+    // (from FunctionalProperty, InverseFunctionalProperty, MaxCardinality 1,
+    // or asserted owl:sameAs), expand facts across equivalence classes, repeat.
+    loop {
+        inner_fixpoint(
+            store,
+            schema,
+            max_iterations,
+            &mut stats,
+            &mut candidate_types,
+            &mut candidate_properties,
+            relation_budget,
+        )?;
+
+        let new_equalities =
+            evaluate_equality_rules(store, schema, &mut union_find, owl_same_as)?;
+        if new_equalities == 0 {
+            break;
+        }
+
+        stats.equality_merges += new_equalities;
+        stats.equality_iterations += 1;
+        tracing::debug!(
+            merges = new_equalities,
+            total = stats.equality_merges,
+            "Equality iteration {}",
+            stats.equality_iterations
+        );
+
+        generate_equality_candidates(
+            store,
+            &mut union_find,
+            &mut candidate_types,
+            &mut candidate_properties,
+        )?;
+    }
+
+    if union_find.has_merges() {
+        let sameas_count = emit_sameas_triples(store, &mut union_find, owl_same_as)?;
+        stats.inferred_properties += sameas_count;
+    }
+
+    stats.fixpoint_reached = true;
+    Ok(stats)
+}
+
+/// Run the inner (non-equality) fixpoint to completion.
+///
+/// Seeds from asserted facts and processes any pre-populated candidates
+/// (e.g. from canonical rewrites after equality discovery).
+fn inner_fixpoint(
+    store: &mut FactStore,
+    schema: &CompiledSchema,
+    max_iterations: Option<usize>,
+    stats: &mut ReasoningStats,
+    candidate_types: &mut BinaryRelation,
+    candidate_properties: &mut TernaryRelation,
+    relation_budget: usize,
+) -> Result<()> {
+    let work_dir = store.work_dir().to_path_buf();
+    let mut delta_types = BinaryRelation::new(&work_dir, "engine-delta-types", relation_budget);
     let mut delta_properties =
-        TernaryRelation::new(work_dir, "engine-delta-props", relation_budget);
+        TernaryRelation::new(&work_dir, "engine-delta-props", relation_budget);
 
     let needs_property_index = !schema.indexed_predicates.is_empty();
     let needs_type_index = !schema.indexed_classes.is_empty();
@@ -409,7 +703,7 @@ pub fn materialize(
 
     for result in store.asserted_types_iter()? {
         let (instance, class) = result?;
-        apply_type_rules(instance, class, schema, &mut candidate_types)?;
+        apply_type_rules(instance, class, schema, candidate_types)?;
     }
     for result in store.asserted_properties_iter()? {
         let (subject, predicate, object) = result?;
@@ -418,8 +712,8 @@ pub fn materialize(
             predicate,
             object,
             schema,
-            &mut candidate_types,
-            &mut candidate_properties,
+            candidate_types,
+            candidate_properties,
         )?;
     }
 
@@ -438,8 +732,8 @@ pub fn materialize(
                 class,
                 schema,
                 &seed_indexes,
-                &mut candidate_types,
-                &mut candidate_properties,
+                candidate_types,
+                candidate_properties,
             )?;
         }
         for result in store.asserted_properties_iter()? {
@@ -450,8 +744,8 @@ pub fn materialize(
                 object,
                 schema,
                 &seed_indexes,
-                &mut candidate_types,
-                &mut candidate_properties,
+                candidate_types,
+                candidate_properties,
             )?;
         }
     }
@@ -520,14 +814,14 @@ pub fn materialize(
         for result in MergeBinaryIter::new(delta_types.segment_iters()?)? {
             let (instance, class) = result?;
             store.derived_types_mut().push((instance, class))?;
-            apply_type_rules(instance, class, schema, &mut candidate_types)?;
+            apply_type_rules(instance, class, schema, candidate_types)?;
             apply_type_join_rules(
                 instance,
                 class,
                 schema,
                 &known_indexes,
-                &mut candidate_types,
-                &mut candidate_properties,
+                candidate_types,
+                candidate_properties,
             )?;
         }
 
@@ -560,8 +854,8 @@ pub fn materialize(
                 predicate,
                 object,
                 schema,
-                &mut candidate_types,
-                &mut candidate_properties,
+                candidate_types,
+                candidate_properties,
             )?;
             // delta ⋈ known joins
             apply_property_join_rules(
@@ -570,8 +864,8 @@ pub fn materialize(
                 object,
                 schema,
                 &known_indexes,
-                &mut candidate_types,
-                &mut candidate_properties,
+                candidate_types,
+                candidate_properties,
             )?;
             // delta ⋈ delta joins (property index only — type deltas already consumed above)
             apply_property_join_rules(
@@ -580,12 +874,11 @@ pub fn materialize(
                 object,
                 schema,
                 &delta_indexes,
-                &mut candidate_types,
-                &mut candidate_properties,
+                candidate_types,
+                candidate_properties,
             )?;
         }
     }
 
-    stats.fixpoint_reached = true;
-    Ok(stats)
+    Ok(())
 }
