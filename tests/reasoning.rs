@@ -1395,6 +1395,494 @@ SubClassOf(:A :B)
     assert_eq!(count_triples(&inferred), 3, "each instance inferred independently: {inferred}");
 }
 
+// ─── Class restriction rules (Step 4) ────────────────────────────────────────
+
+#[test]
+fn has_value_property_to_type() {
+    // cls-hv1: SubClassOf(HasValue(hasPet, fido), PetOwner) — property(x,hasPet,fido) → type(x,PetOwner)
+    let inferred = reason(
+        "<http://x.com/alice> <http://x.com/hasPet> <http://x.com/fido> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:hasPet))
+Declaration(Class(:PetOwner))
+Declaration(NamedIndividual(:fido))
+SubClassOf(ObjectHasValue(:hasPet :fido) :PetOwner)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/PetOwner> ."));
+    assert_eq!(count_triples(&inferred), 1, "cls-hv1: {inferred}");
+}
+
+#[test]
+fn has_value_type_to_property() {
+    // cls-hv2: SubClassOf(PetOwner, HasValue(hasPet, fido)) — type(x,PetOwner) → property(x,hasPet,fido)
+    let inferred = reason(
+        "<http://x.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/PetOwner> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:hasPet))
+Declaration(Class(:PetOwner))
+Declaration(NamedIndividual(:fido))
+SubClassOf(:PetOwner ObjectHasValue(:hasPet :fido))
+)",
+    );
+    assert!(inferred.contains("<http://x.com/alice> <http://x.com/hasPet> <http://x.com/fido> ."));
+    assert_eq!(count_triples(&inferred), 1, "cls-hv2: {inferred}");
+}
+
+#[test]
+fn has_value_does_not_fire_for_wrong_value() {
+    let inferred = reason(
+        "<http://x.com/alice> <http://x.com/hasPet> <http://x.com/rex> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:hasPet))
+Declaration(Class(:PetOwner))
+Declaration(NamedIndividual(:fido))
+SubClassOf(ObjectHasValue(:hasPet :fido) :PetOwner)
+)",
+    );
+    assert_eq!(count_triples(&inferred), 0, "wrong value should not trigger hasValue: {inferred}");
+}
+
+#[test]
+fn some_values_from_basic() {
+    // cls-svf1: SubClassOf(SomeValuesFrom(hasPet, Dog), DogOwner)
+    // property(alice, hasPet, fido) ∧ type(fido, Dog) → type(alice, DogOwner)
+    let inferred = reason(
+        "\
+<http://x.com/alice> <http://x.com/hasPet> <http://x.com/fido> .
+<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:hasPet))
+Declaration(Class(:Dog))
+Declaration(Class(:DogOwner))
+SubClassOf(ObjectSomeValuesFrom(:hasPet :Dog) :DogOwner)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/DogOwner> ."));
+    assert_eq!(count_triples(&inferred), 1, "cls-svf1: {inferred}");
+}
+
+#[test]
+fn some_values_from_missing_filler_type() {
+    // fido is not typed as Dog → no inference
+    let inferred = reason(
+        "<http://x.com/alice> <http://x.com/hasPet> <http://x.com/fido> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:hasPet))
+Declaration(Class(:Dog))
+Declaration(Class(:DogOwner))
+SubClassOf(ObjectSomeValuesFrom(:hasPet :Dog) :DogOwner)
+)",
+    );
+    assert_eq!(count_triples(&inferred), 0, "missing filler type means no svf: {inferred}");
+}
+
+#[test]
+fn some_values_from_type_triggered() {
+    // Property assertion arrives first (in seed), type arrives via inference
+    // SubClassOf(A, B) + SubClassOf(SVF(p, B), C)
+    // type(y, A) → type(y, B) [subclass], then property(x, p, y) ∧ type(y, B) → type(x, C) [svf]
+    let inferred = reason(
+        "\
+<http://x.com/x> <http://x.com/p> <http://x.com/y> .
+<http://x.com/y> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+Declaration(Class(:A))
+Declaration(Class(:B))
+Declaration(Class(:C))
+SubClassOf(:A :B)
+SubClassOf(ObjectSomeValuesFrom(:p :B) :C)
+)",
+    );
+    // y:A → y:B, then x p y ∧ y:B → x:C
+    assert!(inferred.contains("<http://x.com/y> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> ."));
+    assert!(inferred.contains("<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> ."));
+    assert_eq!(count_triples(&inferred), 2, "svf type-triggered: {inferred}");
+}
+
+#[test]
+fn all_values_from_basic() {
+    // cls-avf: SubClassOf(DogOwner, AllValuesFrom(hasPet, Dog))
+    // type(alice, DogOwner) ∧ property(alice, hasPet, fido) → type(fido, Dog)
+    let inferred = reason(
+        "\
+<http://x.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/DogOwner> .
+<http://x.com/alice> <http://x.com/hasPet> <http://x.com/fido> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:hasPet))
+Declaration(Class(:Dog))
+Declaration(Class(:DogOwner))
+SubClassOf(:DogOwner ObjectAllValuesFrom(:hasPet :Dog))
+)",
+    );
+    assert!(inferred.contains("<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> ."));
+    assert_eq!(count_triples(&inferred), 1, "cls-avf: {inferred}");
+}
+
+#[test]
+fn all_values_from_no_fire_without_class_membership() {
+    // alice is NOT typed DogOwner, so AVF should not fire
+    let inferred = reason(
+        "<http://x.com/alice> <http://x.com/hasPet> <http://x.com/fido> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:hasPet))
+Declaration(Class(:Dog))
+Declaration(Class(:DogOwner))
+SubClassOf(:DogOwner ObjectAllValuesFrom(:hasPet :Dog))
+)",
+    );
+    assert_eq!(count_triples(&inferred), 0, "avf without class membership: {inferred}");
+}
+
+#[test]
+fn all_values_from_property_triggered() {
+    // type arrives first (in seed), property arrives via inference (inverse)
+    // SubClassOf(A, AVF(p, B)) + inverse(q, p)
+    // data: type(x, A), q(y, x) → p(x, y) [inverse], then type(x, A) ∧ p(x, y) → type(y, B)
+    let inferred = reason(
+        "\
+<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .
+<http://x.com/y> <http://x.com/q> <http://x.com/x> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+Declaration(ObjectProperty(:q))
+Declaration(Class(:A))
+Declaration(Class(:B))
+InverseObjectProperties(:q :p)
+SubClassOf(:A ObjectAllValuesFrom(:p :B))
+)",
+    );
+    // q(y, x) → p(x, y) [inverse], then type(x, A) ∧ p(x, y) → type(y, B) [avf]
+    assert!(inferred.contains("<http://x.com/x> <http://x.com/p> <http://x.com/y> ."));
+    assert!(inferred.contains("<http://x.com/y> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> ."));
+}
+
+#[test]
+fn intersection_of_basic() {
+    // cls-int1: SubClassOf(IntersectionOf(Dog, Worker), WorkingDog)
+    // type(rex, Dog) ∧ type(rex, Worker) → type(rex, WorkingDog)
+    let inferred = reason(
+        "\
+<http://x.com/rex> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> .
+<http://x.com/rex> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Worker> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Dog))
+Declaration(Class(:Worker))
+Declaration(Class(:WorkingDog))
+SubClassOf(ObjectIntersectionOf(:Dog :Worker) :WorkingDog)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/rex> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/WorkingDog> ."));
+    assert_eq!(count_triples(&inferred), 1, "cls-int1: {inferred}");
+}
+
+#[test]
+fn intersection_of_missing_conjunct() {
+    // rex is only Dog, not Worker → no inference
+    let inferred = reason(
+        "<http://x.com/rex> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Dog))
+Declaration(Class(:Worker))
+Declaration(Class(:WorkingDog))
+SubClassOf(ObjectIntersectionOf(:Dog :Worker) :WorkingDog)
+)",
+    );
+    assert_eq!(count_triples(&inferred), 0, "missing conjunct: {inferred}");
+}
+
+#[test]
+fn intersection_of_conjunct_arrives_via_inference() {
+    // rex is Dog; Worker arrives via subclass from Laborer
+    let inferred = reason(
+        "\
+<http://x.com/rex> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> .
+<http://x.com/rex> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Laborer> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Dog))
+Declaration(Class(:Worker))
+Declaration(Class(:Laborer))
+Declaration(Class(:WorkingDog))
+SubClassOf(:Laborer :Worker)
+SubClassOf(ObjectIntersectionOf(:Dog :Worker) :WorkingDog)
+)",
+    );
+    // Laborer → Worker, then Dog ∧ Worker → WorkingDog
+    assert!(inferred.contains("<http://x.com/rex> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Worker> ."));
+    assert!(inferred.contains("<http://x.com/rex> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/WorkingDog> ."));
+}
+
+#[test]
+fn intersection_of_decomposition() {
+    // cls-int2: EquivalentClasses(WorkingDog, IntersectionOf(Dog, Worker))
+    // The EquivalentClasses produces SubClassOf(WorkingDog, IntersectionOf(Dog, Worker))
+    // which the parser decomposes to SubClassOf(WorkingDog, Dog) and SubClassOf(WorkingDog, Worker)
+    // So type(rex, WorkingDog) → type(rex, Dog) ∧ type(rex, Worker)
+    let inferred = reason(
+        "<http://x.com/rex> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/WorkingDog> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Dog))
+Declaration(Class(:Worker))
+Declaration(Class(:WorkingDog))
+SubClassOf(:WorkingDog ObjectIntersectionOf(:Dog :Worker))
+)",
+    );
+    assert!(inferred.contains("<http://x.com/rex> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> ."));
+    assert!(inferred.contains("<http://x.com/rex> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Worker> ."));
+    assert_eq!(count_triples(&inferred), 2, "cls-int2 decomposition: {inferred}");
+}
+
+#[test]
+fn union_decomposition_via_subclass() {
+    // EquivalentClasses(Animal, UnionOf(Cat, Dog)) decomposes to SubClassOf(Cat, Animal), SubClassOf(Dog, Animal)
+    let inferred = reason(
+        "\
+<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> .
+<http://x.com/whiskers> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Cat> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Animal))
+Declaration(Class(:Cat))
+Declaration(Class(:Dog))
+EquivalentClasses(:Animal ObjectUnionOf(:Cat :Dog))
+)",
+    );
+    assert!(inferred.contains("<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Animal> ."));
+    assert!(inferred.contains("<http://x.com/whiskers> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Animal> ."));
+    assert_eq!(count_triples(&inferred), 2, "union decomposition: {inferred}");
+}
+
+#[test]
+fn svf_plus_avf_interaction() {
+    // SVF and AVF on the same property, creating a chain of inferences
+    // SubClassOf(SVF(p, B), C) and SubClassOf(C, AVF(q, D))
+    // property(x, p, y) ∧ type(y, B) → type(x, C) [svf]
+    // type(x, C) ∧ property(x, q, z) → type(z, D) [avf]
+    let inferred = reason(
+        "\
+<http://x.com/x> <http://x.com/p> <http://x.com/y> .
+<http://x.com/y> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> .
+<http://x.com/x> <http://x.com/q> <http://x.com/z> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+Declaration(ObjectProperty(:q))
+Declaration(Class(:B))
+Declaration(Class(:C))
+Declaration(Class(:D))
+SubClassOf(ObjectSomeValuesFrom(:p :B) :C)
+SubClassOf(:C ObjectAllValuesFrom(:q :D))
+)",
+    );
+    assert!(inferred.contains("<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> ."));
+    assert!(inferred.contains("<http://x.com/z> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/D> ."));
+}
+
+#[test]
+fn has_value_plus_subclass_interaction() {
+    // cls-hv1 infers type, then subclass propagates it
+    // HasValue(p, v) → C, C ⊑ D
+    let inferred = reason(
+        "<http://x.com/a> <http://x.com/p> <http://x.com/v> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+Declaration(Class(:C))
+Declaration(Class(:D))
+Declaration(NamedIndividual(:v))
+SubClassOf(ObjectHasValue(:p :v) :C)
+SubClassOf(:C :D)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> ."));
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/D> ."));
+    assert_eq!(count_triples(&inferred), 2, "hv1 + subclass: {inferred}");
+}
+
+// ─── owl:Thing handling ─────────────────────────────────────────────────────
+
+#[test]
+fn owl_thing_not_materialized_as_superclass() {
+    // SubClassOf(Dog, owl:Thing) should not produce type(fido, owl:Thing)
+    let inferred = reason(
+        "<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Dog))
+SubClassOf(:Dog owl:Thing)
+)",
+    );
+    assert_eq!(count_triples(&inferred), 0, "owl:Thing superclass should be suppressed: {inferred}");
+}
+
+#[test]
+fn owl_thing_subclass_produces_universal_types() {
+    // SubClassOf(owl:Thing, Existent) → every individual gets type(x, Existent)
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> .
+<http://x.com/b> <http://x.com/p> <http://x.com/c> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Existent))
+SubClassOf(owl:Thing :Existent)
+)",
+    );
+    // a (from type assertion), b and c (from property assertion) should all be Existent
+    assert!(inferred.contains("<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Existent> ."));
+    assert!(inferred.contains("<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Existent> ."));
+    assert!(inferred.contains("<http://x.com/c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Existent> ."));
+    assert_eq!(count_triples(&inferred), 3, "universal types: {inferred}");
+}
+
+#[test]
+fn svf_owl_thing_filler_becomes_property_existence() {
+    // SubClassOf(SomeValuesFrom(hasPet, owl:Thing), PetOwner)
+    // property(alice, hasPet, fido) → type(alice, PetOwner) without filler check
+    let inferred = reason(
+        "<http://x.com/alice> <http://x.com/hasPet> <http://x.com/fido> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:hasPet))
+Declaration(Class(:PetOwner))
+SubClassOf(ObjectSomeValuesFrom(:hasPet owl:Thing) :PetOwner)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/PetOwner> ."));
+    assert_eq!(count_triples(&inferred), 1, "svf owl:Thing: {inferred}");
+}
+
+#[test]
+fn avf_owl_thing_filler_is_dropped() {
+    // SubClassOf(Keeper, AllValuesFrom(hasPet, owl:Thing)) is trivially true — no inference
+    let inferred = reason(
+        "\
+<http://x.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Keeper> .
+<http://x.com/alice> <http://x.com/hasPet> <http://x.com/fido> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:hasPet))
+Declaration(Class(:Keeper))
+SubClassOf(:Keeper ObjectAllValuesFrom(:hasPet owl:Thing))
+)",
+    );
+    assert_eq!(count_triples(&inferred), 0, "avf owl:Thing should be dropped: {inferred}");
+}
+
+#[test]
+fn domain_owl_thing_is_dropped() {
+    // ObjectPropertyDomain(p, owl:Thing) is trivially true — no inference
+    let inferred = reason(
+        "<http://x.com/a> <http://x.com/p> <http://x.com/b> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+ObjectPropertyDomain(:p owl:Thing)
+)",
+    );
+    assert_eq!(count_triples(&inferred), 0, "domain owl:Thing should be dropped: {inferred}");
+}
+
+#[test]
+fn range_owl_thing_is_dropped() {
+    // ObjectPropertyRange(p, owl:Thing) is trivially true — no inference
+    let inferred = reason(
+        "<http://x.com/a> <http://x.com/p> <http://x.com/b> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+ObjectPropertyRange(:p owl:Thing)
+)",
+    );
+    assert_eq!(count_triples(&inferred), 0, "range owl:Thing should be dropped: {inferred}");
+}
+
+#[test]
+fn intersection_owl_thing_conjunct_is_removed() {
+    // SubClassOf(IntersectionOf(Dog, owl:Thing), GoodDog) simplifies to SubClassOf(Dog, GoodDog)
+    let inferred = reason(
+        "<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Dog))
+Declaration(Class(:GoodDog))
+SubClassOf(ObjectIntersectionOf(:Dog owl:Thing) :GoodDog)
+)",
+    );
+    assert!(inferred.contains("<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/GoodDog> ."));
+    assert_eq!(count_triples(&inferred), 1, "intersection with owl:Thing conjunct removed: {inferred}");
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn write(path: &Path, content: &str) {

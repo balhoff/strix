@@ -7,8 +7,8 @@ use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 #[command(
     name = "strix",
     about = "Rule-based RDF/OWL reasoner",
-    long_about = "Runs RDF ingestion, schema compilation, RDFS materialization, and export. \
-                  The Phase 1 CLI currently exposes the end-to-end `reason` subcommand.",
+    long_about = "Forward-chaining OWL 2 RL reasoner. Runs RDF ingestion, schema compilation, \
+                  ABox materialization, and export.",
     arg_required_else_help = true,
     disable_help_subcommand = true
 )]

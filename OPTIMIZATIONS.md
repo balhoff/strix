@@ -14,6 +14,18 @@ Instead of writing deltas to disk and reading them back, apply rules inline duri
 
 **Impact**: Eliminates redundant file open overhead per iteration. Requires restructuring borrows so asserted iterators can be held while derived segments are mutated.
 
+## Engine: deduplicate universal_types candidates per individual
+
+When `universal_types` is non-empty (from `SubClassOf(owl:Thing, C)`), every individual emits `type(x, C)` for each fact it appears in — producing many duplicates that are later compacted and differenced away. A per-iteration `HashSet<TermId>` of already-seen individuals could skip redundant pushes, or a separate one-shot pass over distinct individuals could replace the per-fact emission.
+
+**Impact**: Only matters when the ontology has `SubClassOf(owl:Thing, C)` (uncommon). Reduces candidate volume and associated sort/merge/difference I/O proportionally to entity fan-out.
+
+## Engine: incremental index updates instead of full rebuild
+
+`build_type_index` and `build_property_index` do a full scan of all known facts every iteration. An incremental approach (add delta entries to the existing index) would avoid rescanning the growing known store each round.
+
+**Impact**: Reduces per-iteration overhead linearly with store size. Requires the index to persist across iterations and careful handling of new derived entries.
+
 ## Store: unify BinaryRelation and TernaryRelation via generic Relation\<T\>
 
 ~100 lines of near-identical code between `BinaryRelation` and `TernaryRelation`. Could be unified into `Relation<T>` parameterized over tuple type, with a trait for serialization.

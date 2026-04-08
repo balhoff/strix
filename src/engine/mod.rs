@@ -27,7 +27,7 @@ impl ReasoningStats {
 /// In-memory index of property assertions for join-requiring rules.
 ///
 /// Only indexes predicates listed in `CompiledSchema::indexed_predicates`
-/// (currently transitive properties; Steps 4-5 will add more).
+/// (transitive, someValuesFrom, allValuesFrom properties).
 struct PropertyIndex {
     /// (predicate, subject) → sorted vec of objects
     by_pred_subj: BTreeMap<(TermId, TermId), Vec<TermId>>,
@@ -100,6 +100,74 @@ fn build_property_index(store: &mut FactStore, schema: &CompiledSchema) -> Resul
     Ok(index)
 }
 
+// ─── Type index for join-requiring rules ─────────────────────────────────────
+
+/// In-memory index of type assertions for join-requiring rules.
+///
+/// Only indexes classes listed in `CompiledSchema::indexed_classes`
+/// (someValuesFrom fillers, allValuesFrom classes, intersection conjuncts).
+struct TypeIndex {
+    /// instance → sorted vec of classes
+    by_instance: BTreeMap<TermId, Vec<TermId>>,
+}
+
+impl TypeIndex {
+    fn new() -> Self {
+        Self {
+            by_instance: BTreeMap::new(),
+        }
+    }
+
+    fn insert(&mut self, instance: TermId, class: TermId) {
+        self.by_instance
+            .entry(instance)
+            .or_default()
+            .push(class);
+    }
+
+    fn dedup(&mut self) {
+        for values in self.by_instance.values_mut() {
+            values.sort_unstable();
+            values.dedup();
+        }
+    }
+
+    /// Classes that instance belongs to (filtered to indexed classes).
+    fn classes_of(&self, instance: TermId) -> &[TermId] {
+        self.by_instance
+            .get(&instance)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    fn has_type(&self, instance: TermId, class: TermId) -> bool {
+        self.classes_of(instance).binary_search(&class).is_ok()
+    }
+}
+
+/// Build a type index from current known types, filtered to indexed classes.
+fn build_type_index(store: &mut FactStore, schema: &CompiledSchema) -> Result<TypeIndex> {
+    if schema.indexed_classes.is_empty() {
+        return Ok(TypeIndex::new());
+    }
+
+    let mut index = TypeIndex::new();
+    for result in store.known_types_iter()? {
+        let (instance, class) = result?;
+        if schema.indexed_classes.contains(&class) {
+            index.insert(instance, class);
+        }
+    }
+    index.dedup();
+    Ok(index)
+}
+
+/// Bundled indexes for join-based rule evaluation.
+struct JoinIndexes<'a> {
+    types: &'a TypeIndex,
+    properties: &'a PropertyIndex,
+}
+
 // ─── Rule application ───────────────────────────────────────────────────────
 
 fn apply_type_rules(
@@ -111,6 +179,75 @@ fn apply_type_rules(
     for &superclass in schema.superclasses_for(class) {
         candidate_types.push((instance, superclass))?;
     }
+    for &ut in &schema.universal_types {
+        candidate_types.push((instance, ut))?;
+    }
+    Ok(())
+}
+
+/// Join-based rules for type deltas that require in-memory indexes.
+///
+/// Handles:
+///   - intersectionOf (cls-int2): type(x,C) where C is an intersection → emit type(x,Ci) for each conjunct
+///   - intersectionOf (cls-int1): type(x,D) where D is a conjunct → check all other conjuncts in type_index
+///   - allValuesFrom: type(x,A) where allValuesFrom(A,P,B) → for each property(x,P,y), emit type(y,B)
+///   - hasValue (cls-hv2): type(x,A) where hasValue_sub(A,P,v) → emit property(x,P,v)
+///   - someValuesFrom (type-triggered): type(y,D) where someValuesFrom(C,P,D) → for each property(z,P,y), emit type(z,C)
+fn apply_type_join_rules(
+    instance: TermId,
+    class: TermId,
+    schema: &CompiledSchema,
+    indexes: &JoinIndexes<'_>,
+    candidate_types: &mut BinaryRelation,
+    candidate_properties: &mut TernaryRelation,
+) -> Result<()> {
+    // cls-int2: type(x,C) where C is intersection → emit conjuncts
+    if let Some(conjuncts) = schema.intersection_conjuncts.get(&class) {
+        for &conjunct in conjuncts {
+            candidate_types.push((instance, conjunct))?;
+        }
+    }
+
+    // cls-int1: type(x,D) where D is a conjunct → check all other conjuncts
+    if let Some(intersection_classes) = schema.conjunct_of.get(&class) {
+        for &int_class in intersection_classes {
+            if let Some(conjuncts) = schema.intersection_conjuncts.get(&int_class) {
+                let all_present = conjuncts
+                    .iter()
+                    .all(|&c| c == class || indexes.types.has_type(instance, c));
+                if all_present {
+                    candidate_types.push((instance, int_class))?;
+                }
+            }
+        }
+    }
+
+    // cls-avf: type(x,A) where allValuesFrom(A,P,B) → for each property(x,P,y), emit type(y,B)
+    if let Some(entries) = schema.all_values_from_by_class.get(&class) {
+        for &(prop, filler) in entries {
+            for &y in indexes.properties.objects_for(prop, instance) {
+                candidate_types.push((y, filler))?;
+            }
+        }
+    }
+
+    // cls-hv2: type(x,A) where hasValue_sub(A,P,v) → emit property(x,P,v)
+    if let Some(entries) = schema.has_value_by_class.get(&class) {
+        for &(prop, val) in entries {
+            candidate_properties.push((instance, prop, val))?;
+        }
+    }
+
+    // cls-svf1 (type-triggered): type(y,D) where someValuesFrom(C,P,D) →
+    //   for each property(z,P,y) in prop_index, emit type(z,C)
+    if let Some(entries) = schema.some_values_from_by_filler.get(&class) {
+        for &(svf_class, prop) in entries {
+            for &z in indexes.properties.subjects_for(prop, instance) {
+                candidate_types.push((z, svf_class))?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -137,33 +274,69 @@ fn apply_property_rules(
     if schema.is_symmetric(predicate) {
         candidate_properties.push((object, predicate, subject))?;
     }
+    // cls-hv1: property(x,P,v) where hasValue_super(C,P,v) → type(x,C)
+    if let Some(entries) = schema.has_value_by_prop.get(&predicate) {
+        for &(class, val) in entries {
+            if object == val {
+                candidate_types.push((subject, class))?;
+            }
+        }
+    }
+    // svf-thing: property(x,P,_) → type(x,C) — no filler check needed
+    if let Some(classes) = schema.svf_thing_by_prop.get(&predicate) {
+        for &class in classes {
+            candidate_types.push((subject, class))?;
+        }
+    }
+    for &ut in &schema.universal_types {
+        candidate_types.push((subject, ut))?;
+        candidate_types.push((object, ut))?;
+    }
     Ok(())
 }
 
-/// Join-based rules for property deltas that require an in-memory index.
+/// Join-based rules for property deltas that require in-memory indexes.
 ///
-/// Currently handles transitive properties. When delta property(x, p, y)
-/// arrives and p is transitive:
-///   - Forward: for each known property(y, p, z), emit property(x, p, z)
-///   - Backward: for each known property(w, p, x), emit property(w, p, y)
+/// Handles:
+///   - Transitive property chaining via PropertyIndex
+///   - cls-svf1 (property-triggered): property(x,P,y) ∧ type(y,D) → type(x,C)
+///   - cls-avf (property-triggered): property(x,P,y) ∧ type(x,A) → type(y,B)
 fn apply_property_join_rules(
     subject: TermId,
     predicate: TermId,
     object: TermId,
     schema: &CompiledSchema,
-    property_index: &PropertyIndex,
+    indexes: &JoinIndexes<'_>,
+    candidate_types: &mut BinaryRelation,
     candidate_properties: &mut TernaryRelation,
 ) -> Result<()> {
     if schema.is_transitive(predicate) {
-        // Forward: delta(x, p, y) ∧ known(y, p, z) → candidate(x, p, z)
-        for &z in property_index.objects_for(predicate, object) {
+        for &z in indexes.properties.objects_for(predicate, object) {
             candidate_properties.push((subject, predicate, z))?;
         }
-        // Backward: known(w, p, x) ∧ delta(x, p, y) → candidate(w, p, y)
-        for &w in property_index.subjects_for(predicate, subject) {
+        for &w in indexes.properties.subjects_for(predicate, subject) {
             candidate_properties.push((w, predicate, object))?;
         }
     }
+
+    // cls-svf1 (property-triggered): check type_index for type(y,D) → emit type(x,C)
+    if let Some(entries) = schema.some_values_from_by_prop.get(&predicate) {
+        for &(class, filler) in entries {
+            if indexes.types.has_type(object, filler) {
+                candidate_types.push((subject, class))?;
+            }
+        }
+    }
+
+    // cls-avf (property-triggered): check type_index for type(x,A) → emit type(y,B)
+    if let Some(entries) = schema.all_values_from_by_prop.get(&predicate) {
+        for &(class, filler) in entries {
+            if indexes.types.has_type(subject, class) {
+                candidate_types.push((object, filler))?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -187,8 +360,11 @@ pub fn materialize(
         TernaryRelation::new(work_dir, "engine-delta-props", relation_budget);
 
     let needs_property_index = !schema.indexed_predicates.is_empty();
+    let needs_type_index = !schema.indexed_classes.is_empty();
+    // cls-hv2 needs the seed join pass but doesn't contribute to indexed sets
+    let needs_seed_join_pass =
+        needs_property_index || needs_type_index || !schema.has_value_by_class.is_empty();
 
-    // Seed: stream asserted facts to generate initial candidates
     for result in store.asserted_types_iter()? {
         let (instance, class) = result?;
         apply_type_rules(instance, class, schema, &mut candidate_types)?;
@@ -205,10 +381,25 @@ pub fn materialize(
         )?;
     }
 
-    // Seed join-based rules (transitive properties, etc.) using an index
-    // built from asserted facts.
-    if needs_property_index {
-        let seed_index = build_property_index(store, schema)?;
+    if needs_seed_join_pass {
+        let seed_type_index = build_type_index(store, schema)?;
+        let seed_prop_index = build_property_index(store, schema)?;
+        let seed_indexes = JoinIndexes {
+            types: &seed_type_index,
+            properties: &seed_prop_index,
+        };
+
+        for result in store.asserted_types_iter()? {
+            let (instance, class) = result?;
+            apply_type_join_rules(
+                instance,
+                class,
+                schema,
+                &seed_indexes,
+                &mut candidate_types,
+                &mut candidate_properties,
+            )?;
+        }
         for result in store.asserted_properties_iter()? {
             let (subject, predicate, object) = result?;
             apply_property_join_rules(
@@ -216,7 +407,8 @@ pub fn materialize(
                 predicate,
                 object,
                 schema,
-                &seed_index,
+                &seed_indexes,
+                &mut candidate_types,
                 &mut candidate_properties,
             )?;
         }
@@ -234,15 +426,13 @@ pub fn materialize(
         }
         stats.iterations += 1;
 
-        // Compact candidates into single sorted, deduped segments
         candidate_types.compact()?;
         candidate_properties.compact()?;
 
-        // Clear deltas from previous iteration
         delta_types.clear();
         delta_properties.clear();
 
-        // Streaming difference: candidate stream vs known stream → delta relations
+        // Streaming difference: candidates vs known → deltas
         let new_type_count = difference_streaming_into(
             MergeBinaryIter::new(candidate_types.segment_iters()?)?,
             store.known_types_iter()?,
@@ -262,31 +452,45 @@ pub fn materialize(
         stats.inferred_types += new_type_count;
         stats.inferred_properties += new_prop_count;
 
-        // Clear candidates for next round
         candidate_types.clear();
         candidate_properties.clear();
 
-        // Compact deltas so each is a single sorted, deduped segment
         delta_types.compact()?;
         delta_properties.compact()?;
 
-        // Build in-memory index of known properties for join-based rules.
-        // Built BEFORE consuming deltas so it reflects the pre-delta state.
-        let property_index = if needs_property_index {
+        // Build in-memory indexes of known facts for join-based rules.
+        // Built BEFORE consuming deltas so they reflect the pre-delta state.
+        let type_index = if needs_type_index {
+            build_type_index(store, schema)?
+        } else {
+            TypeIndex::new()
+        };
+        let known_prop_index = if needs_property_index {
             build_property_index(store, schema)?
         } else {
             PropertyIndex::new()
         };
+        let known_indexes = JoinIndexes {
+            types: &type_index,
+            properties: &known_prop_index,
+        };
 
-        // Single-pass delta consumption: push into derived + generate next candidates
         for result in MergeBinaryIter::new(delta_types.segment_iters()?)? {
             let (instance, class) = result?;
             store.derived_types_mut().push((instance, class))?;
             apply_type_rules(instance, class, schema, &mut candidate_types)?;
+            apply_type_join_rules(
+                instance,
+                class,
+                schema,
+                &known_indexes,
+                &mut candidate_types,
+                &mut candidate_properties,
+            )?;
         }
 
-        // Build a delta-only index for delta⋈delta joins (transitive, etc.)
-        let delta_property_index = if needs_property_index {
+        // Build a delta-only property index for delta⋈delta joins
+        let delta_prop_index = if needs_property_index {
             let mut idx = PropertyIndex::new();
             for result in MergeTernaryIter::new(delta_properties.segment_iters()?)? {
                 let (s, p, o) = result?;
@@ -298,6 +502,10 @@ pub fn materialize(
             idx
         } else {
             PropertyIndex::new()
+        };
+        let delta_indexes = JoinIndexes {
+            types: &type_index,
+            properties: &delta_prop_index,
         };
 
         for result in MergeTernaryIter::new(delta_properties.segment_iters()?)? {
@@ -319,16 +527,18 @@ pub fn materialize(
                 predicate,
                 object,
                 schema,
-                &property_index,
+                &known_indexes,
+                &mut candidate_types,
                 &mut candidate_properties,
             )?;
-            // delta ⋈ delta joins
+            // delta ⋈ delta joins (property index only — type deltas already consumed above)
             apply_property_join_rules(
                 subject,
                 predicate,
                 object,
                 schema,
-                &delta_property_index,
+                &delta_indexes,
+                &mut candidate_types,
                 &mut candidate_properties,
             )?;
         }

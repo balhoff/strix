@@ -94,7 +94,7 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
     };
 
     let mut dictionary = Dictionary::new();
-    let _well_known = WellKnown::register(&mut dictionary);
+    let well_known = WellKnown::register(&mut dictionary);
     let mut schema = RawSchema::default();
     let mut extracted_schema = ExtractedSchema::default();
     let total_budget = args.memory_budget.bytes() as usize;
@@ -143,10 +143,10 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
 
     tracing::info!("Compiling schema");
     let compile_timer = StageTimer::start();
-    let compiled_schema = compile_schema(&schema);
+    let compiled_schema = compile_schema(&schema, well_known.owl_thing);
     let schema_compile_time_ms = compile_timer.elapsed_ms();
 
-    tracing::info!("Materializing RDFS closure");
+    tracing::info!("Materializing inferences");
     let reasoning_timer = StageTimer::start();
     let reasoning_stats = materialize(
         &mut store,
