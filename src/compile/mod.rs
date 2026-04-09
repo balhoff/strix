@@ -64,6 +64,8 @@ pub struct CompiledSchema {
     pub disjoint_property_pairs: Vec<(TermId, TermId)>,
     /// (class, prop, opt_filler) — SubClassOf(A, MaxCard(0,P,C))
     pub max_card_zero: Vec<(TermId, TermId, Option<TermId>)>,
+    pub irreflexive_properties: BTreeSet<TermId>,
+    pub asymmetric_properties: BTreeSet<TermId>,
 
     /// Predicates that require in-memory indexing for join evaluation.
     pub indexed_predicates: BTreeSet<TermId>,
@@ -305,6 +307,8 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
         complement_pairs,
         disjoint_property_pairs,
         max_card_zero,
+        irreflexive_properties: schema.irreflexive_properties.clone(),
+        asymmetric_properties: schema.asymmetric_properties.clone(),
         indexed_predicates,
         indexed_classes,
         schema_iterations: subclass_iterations.max(subproperty_iterations),

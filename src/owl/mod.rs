@@ -61,9 +61,11 @@ pub struct RawSchema {
     /// (class, property, optional_filler) — SubClassOf(A, MaxCard(1,P,C))
     pub max_card_one: Vec<(TermId, TermId, Option<TermId>)>,
 
-    // Inconsistency axioms (Phase 2)
+    // Inconsistency axioms
     pub disjoint_classes: Vec<Vec<TermId>>,
     pub disjoint_properties: Vec<Vec<TermId>>,
+    pub irreflexive_properties: BTreeSet<TermId>,
+    pub asymmetric_properties: BTreeSet<TermId>,
 
     unsupported: BTreeSet<String>,
 }
@@ -91,6 +93,8 @@ impl RawSchema {
             + self.max_card_one.len()
             + self.disjoint_classes.len()
             + self.disjoint_properties.len()
+            + self.irreflexive_properties.len()
+            + self.asymmetric_properties.len()
     }
 
     pub fn unsupported_constructs(&self) -> Vec<String> {

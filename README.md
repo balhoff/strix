@@ -81,6 +81,8 @@ strix reason data.nt -O ontology.ofn -o inferred.nt --report report.json
 | FunctionalObjectProperty | supported (equality via owl:sameAs) |
 | InverseFunctionalObjectProperty | supported (equality via owl:sameAs) |
 | SymmetricObjectProperty | supported |
+| IrreflexiveObjectProperty | supported (inconsistency detection) |
+| AsymmetricObjectProperty | supported (inconsistency detection) |
 | TransitiveObjectProperty | supported |
 | ObjectPropertyDomain | supported |
 | ObjectPropertyRange | supported |
@@ -120,8 +122,6 @@ strix reason data.nt -O ontology.ofn -o inferred.nt --report report.json
 
 | Construct | Notes |
 |---|---|
-| IrreflexiveObjectProperty | Deferred |
-| AsymmetricObjectProperty | Deferred |
 | owl:HasKey | Deferred |
 | Data property restrictions | DataSomeValuesFrom, DataAllValuesFrom, DataHasValue, etc. |
 | SWRL rules | Deferred to a later phase |

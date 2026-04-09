@@ -666,11 +666,27 @@ fn absorb_ontology(
                     "data property restrictions deferred to a later phase".to_string(),
                 );
             }
-            Component::ReflexiveObjectProperty(_)
-            | Component::IrreflexiveObjectProperty(_)
-            | Component::AsymmetricObjectProperty(_) => {
+            Component::IrreflexiveObjectProperty(axiom) => {
+                if let Ok(prop) = encode_named_object_property(&axiom.0, dictionary) {
+                    schema.irreflexive_properties.insert(prop);
+                } else {
+                    schema.unsupported.insert(
+                        "IrreflexiveObjectProperty with inverse property expression".to_string(),
+                    );
+                }
+            }
+            Component::AsymmetricObjectProperty(axiom) => {
+                if let Ok(prop) = encode_named_object_property(&axiom.0, dictionary) {
+                    schema.asymmetric_properties.insert(prop);
+                } else {
+                    schema.unsupported.insert(
+                        "AsymmetricObjectProperty with inverse property expression".to_string(),
+                    );
+                }
+            }
+            Component::ReflexiveObjectProperty(_) => {
                 schema.unsupported.insert(
-                    "ReflexiveObjectProperty/IrreflexiveObjectProperty/AsymmetricObjectProperty not yet implemented".to_string(),
+                    "ReflexiveObjectProperty not yet implemented".to_string(),
                 );
             }
             Component::HasKey { .. } => {

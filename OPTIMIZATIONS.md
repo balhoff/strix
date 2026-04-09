@@ -52,7 +52,7 @@ On the 2nd+ call to `inner_fixpoint` (after equality expansion), the seed pass r
 
 ## Engine: consolidate store scans in inconsistency checks
 
-`check_disjoint_types` and `check_max_card_zero` each independently scan `known_types_iter`, and `check_disjoint_types` and `check_disjoint_properties` each independently scan `known_properties_iter`. A single pass per relation that dispatches to all relevant checks would halve the I/O.
+`check_disjoint_types` and `check_max_card_zero` each independently scan `known_types_iter` (2 scans), and `check_disjoint_properties`, `check_max_card_zero`, `check_irreflexive_properties`, and `check_asymmetric_properties` each independently scan `known_properties_iter` (4 scans). A single pass per relation that dispatches to all relevant checks would reduce I/O significantly.
 
 **Impact**: Proportional to total known facts. Only matters for very large stores where the scan itself is the bottleneck, not the intersection checks.
 

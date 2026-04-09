@@ -2591,6 +2591,106 @@ DisjointUnion(:Animal :Cat :Dog)
     );
 }
 
+// ─── Irreflexive / Asymmetric ───────────────────────────────────────────────
+
+#[test]
+fn irreflexive_property_detected() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "<http://x.com/a> <http://x.com/strictlyGreaterThan> <http://x.com/a> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:strictlyGreaterThan))
+IrreflexiveObjectProperty(:strictlyGreaterThan)
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("IrreflexiveProperty"),
+        "should detect irreflexive self-link: {report_json}"
+    );
+}
+
+#[test]
+fn irreflexive_property_no_self_link() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "<http://x.com/a> <http://x.com/strictlyGreaterThan> <http://x.com/b> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:strictlyGreaterThan))
+IrreflexiveObjectProperty(:strictlyGreaterThan)
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("\"inconsistencies\": []"),
+        "no inconsistency for non-self-link: {report_json}"
+    );
+}
+
+#[test]
+fn asymmetric_property_detected() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/a> <http://x.com/parentOf> <http://x.com/b> .
+<http://x.com/b> <http://x.com/parentOf> <http://x.com/a> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:parentOf))
+AsymmetricObjectProperty(:parentOf)
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("AsymmetricProperty"),
+        "should detect asymmetric violation: {report_json}"
+    );
+}
+
+#[test]
+fn asymmetric_property_no_conflict() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/a> <http://x.com/parentOf> <http://x.com/b> .
+<http://x.com/c> <http://x.com/parentOf> <http://x.com/d> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:parentOf))
+AsymmetricObjectProperty(:parentOf)
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("\"inconsistencies\": []"),
+        "no inconsistency for one-directional links: {report_json}"
+    );
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn write(path: &Path, content: &str) {

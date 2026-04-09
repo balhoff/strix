@@ -304,7 +304,6 @@ DisjointClasses(:Circle :Triangle)
 /// :box1 :contains :item1 . :item1 :contains :box1 .
 /// → INCONSISTENT
 #[test]
-#[ignore = "AsymmetricObjectProperty deferred (not in Phase 2 scope)"]
 fn w3c_asymmetric_property_001_inconsistency() {
     let is_inconsistent = reason_expect_inconsistency(
         "\
@@ -331,7 +330,6 @@ AsymmetricObjectProperty(:contains)
 /// :x :strictlyLargerThan :x .
 /// → INCONSISTENT
 #[test]
-#[ignore = "IrreflexiveObjectProperty deferred (not in Phase 2 scope)"]
 fn w3c_irreflexive_property_001_inconsistency() {
     let is_inconsistent = reason_expect_inconsistency(
         "\

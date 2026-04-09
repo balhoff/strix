@@ -30,6 +30,15 @@ pub enum Inconsistency {
         property: TermId,
         object: TermId,
     },
+    IrreflexiveProperty {
+        individual: TermId,
+        property: TermId,
+    },
+    AsymmetricProperty {
+        subject: TermId,
+        object: TermId,
+        property: TermId,
+    },
 }
 
 /// Check the fully materialized store for logical inconsistencies.
@@ -45,6 +54,8 @@ pub fn check_inconsistencies(
     check_disjoint_types(store, schema, &mut results)?;
     check_disjoint_properties(store, schema, &mut results)?;
     check_max_card_zero(store, schema, &mut results)?;
+    check_irreflexive_properties(store, schema, &mut results)?;
+    check_asymmetric_properties(store, schema, &mut results)?;
 
     Ok(results)
 }
@@ -118,6 +129,21 @@ fn check_disjoint_types(
     Ok(())
 }
 
+/// Build prop → {(subject, object)} for a filtered set of predicates.
+fn collect_property_assertions(
+    store: &mut FactStore,
+    relevant_props: &BTreeSet<TermId>,
+) -> Result<BTreeMap<TermId, BTreeSet<(TermId, TermId)>>> {
+    let mut map: BTreeMap<TermId, BTreeSet<(TermId, TermId)>> = BTreeMap::new();
+    for result in store.known_properties_iter()? {
+        let (s, p, o) = result?;
+        if relevant_props.contains(&p) {
+            map.entry(p).or_default().insert((s, o));
+        }
+    }
+    Ok(map)
+}
+
 /// Check DisjointProperties constraints.
 ///
 /// For each disjoint pair (P, Q), reports any (subject, object) that
@@ -137,14 +163,7 @@ fn check_disjoint_properties(
         relevant_props.insert(b);
     }
 
-    // Build prop → set of (subject, object) for relevant properties.
-    let mut prop_assertions: BTreeMap<TermId, BTreeSet<(TermId, TermId)>> = BTreeMap::new();
-    for result in store.known_properties_iter()? {
-        let (s, p, o) = result?;
-        if relevant_props.contains(&p) {
-            prop_assertions.entry(p).or_default().insert((s, o));
-        }
-    }
+    let prop_assertions = collect_property_assertions(store, &relevant_props)?;
 
     for &(pa, pb) in &schema.disjoint_property_pairs {
         if let (Some(pairs_a), Some(pairs_b)) =
@@ -230,6 +249,61 @@ fn check_max_card_zero(
                         object: obj,
                     });
                 }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Check IrreflexiveObjectProperty constraints.
+///
+/// property(x, P, x) where P is irreflexive is an inconsistency.
+fn check_irreflexive_properties(
+    store: &mut FactStore,
+    schema: &CompiledSchema,
+    results: &mut Vec<Inconsistency>,
+) -> Result<()> {
+    if schema.irreflexive_properties.is_empty() {
+        return Ok(());
+    }
+
+    for result in store.known_properties_iter()? {
+        let (s, p, o) = result?;
+        if s == o && schema.irreflexive_properties.contains(&p) {
+            results.push(Inconsistency::IrreflexiveProperty {
+                individual: s,
+                property: p,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Check AsymmetricObjectProperty constraints.
+///
+/// property(x, P, y) ∧ property(y, P, x) where P is asymmetric is an inconsistency.
+fn check_asymmetric_properties(
+    store: &mut FactStore,
+    schema: &CompiledSchema,
+    results: &mut Vec<Inconsistency>,
+) -> Result<()> {
+    if schema.asymmetric_properties.is_empty() {
+        return Ok(());
+    }
+
+    let prop_assertions = collect_property_assertions(store, &schema.asymmetric_properties)?;
+
+    for (&prop, pairs) in &prop_assertions {
+        for &(s, o) in pairs {
+            // s < o ensures each {(s,o), (o,s)} pair is reported once.
+            if s < o && pairs.contains(&(o, s)) {
+                results.push(Inconsistency::AsymmetricProperty {
+                    subject: s,
+                    object: o,
+                    property: prop,
+                });
             }
         }
     }

@@ -307,5 +307,29 @@ fn format_inconsistency(inc: &Inconsistency, dictionary: &Dictionary) -> Inconsi
                 format_term(*object, dictionary),
             ),
         },
+        Inconsistency::IrreflexiveProperty {
+            individual,
+            property,
+        } => InconsistencyReport {
+            kind: "IrreflexiveProperty".to_string(),
+            detail: format!(
+                "{} has self-link via {}, which is irreflexive",
+                format_term(*individual, dictionary),
+                format_term(*property, dictionary),
+            ),
+        },
+        Inconsistency::AsymmetricProperty {
+            subject,
+            object,
+            property,
+        } => InconsistencyReport {
+            kind: "AsymmetricProperty".to_string(),
+            detail: format!(
+                "{} and {} are linked in both directions via {}, which is asymmetric",
+                format_term(*subject, dictionary),
+                format_term(*object, dictionary),
+                format_term(*property, dictionary),
+            ),
+        },
     }
 }
