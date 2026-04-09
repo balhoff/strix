@@ -55,6 +55,16 @@ pub struct CompiledSchema {
     /// prop → [(class, opt_filler)] — max_card_one indexed by predicate
     pub max_card_one_by_prop: BTreeMap<TermId, Vec<(TermId, Option<TermId>)>>,
 
+    // Inconsistency detection (Phase 2, Step 7)
+    /// Pairwise disjoint class pairs — flattened from DisjointClasses axioms.
+    pub disjoint_class_pairs: Vec<(TermId, TermId)>,
+    /// (class, complement) — from SubClassOf(A, ComplementOf(D)).
+    pub complement_pairs: Vec<(TermId, TermId)>,
+    /// Pairwise disjoint property pairs — flattened from DisjointProperties axioms.
+    pub disjoint_property_pairs: Vec<(TermId, TermId)>,
+    /// (class, prop, opt_filler) — SubClassOf(A, MaxCard(0,P,C))
+    pub max_card_zero: Vec<(TermId, TermId, Option<TermId>)>,
+
     /// Predicates that require in-memory indexing for join evaluation.
     pub indexed_predicates: BTreeSet<TermId>,
     /// Classes that require in-memory indexing for join evaluation.
@@ -241,6 +251,17 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
             .push((cls, filler));
     }
 
+    let disjoint_class_pairs = flatten_pairwise(&schema.disjoint_classes);
+    let complement_pairs: Vec<(TermId, TermId)> = schema.complement_of.iter().copied().collect();
+    let disjoint_property_pairs = flatten_pairwise(&schema.disjoint_properties);
+
+    // MaxCardinality 0: normalize owl:Thing filler to None.
+    let max_card_zero: Vec<(TermId, TermId, Option<TermId>)> = schema
+        .max_card_zero
+        .iter()
+        .map(|&(cls, prop, filler)| (cls, prop, filler.filter(|&f| f != owl_thing)))
+        .collect();
+
     // Predicates needing in-memory indexing for join-based rules.
     // Built from filtered lookup tables so owl:Thing-only entries are excluded.
     let mut indexed_predicates = transitive_properties.clone();
@@ -280,12 +301,29 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
         inverse_functional_properties: schema.inverse_functional_properties.clone(),
         max_card_one,
         max_card_one_by_prop,
+        disjoint_class_pairs,
+        complement_pairs,
+        disjoint_property_pairs,
+        max_card_zero,
         indexed_predicates,
         indexed_classes,
         schema_iterations: subclass_iterations.max(subproperty_iterations),
         schema_inferred: subclass_inferred + subproperty_inferred,
         rule_set: ir::RuleSet::build(),
     }
+}
+
+/// Flatten n-ary disjointness groups into all pairwise (a, b) pairs.
+fn flatten_pairwise(groups: &[Vec<TermId>]) -> Vec<(TermId, TermId)> {
+    let mut pairs = Vec::new();
+    for group in groups {
+        for i in 0..group.len() {
+            for j in (i + 1)..group.len() {
+                pairs.push((group[i], group[j]));
+            }
+        }
+    }
+    pairs
 }
 
 fn to_map(pairs: &BTreeSet<(TermId, TermId)>) -> BTreeMap<TermId, Vec<TermId>> {

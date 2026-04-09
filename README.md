@@ -32,6 +32,7 @@ strix reason <DATA>... --output <PATH> [OPTIONS]
 | `--work-dir`, `-w` | system temp | Directory for intermediate disk-backed relations |
 | `--report` | none | Write a JSON run report to this path |
 | `--max-iterations` | none | Safety cap on fixpoint iterations |
+| `--inconsistency-mode` | `report` | `report` (log warnings) or `halt` (return error) |
 | `--ignore-annotation-axioms` | off | Skip annotation property schema axioms |
 | `--verbose`, `-v` | off | Increase log verbosity (`-v` debug, `-vv` trace) |
 | `--quiet`, `-q` | off | Suppress all output except errors |
@@ -71,11 +72,11 @@ strix reason data.nt -O ontology.ofn -o inferred.nt --report report.json
 |---|---|
 | SubClassOf | supported |
 | EquivalentClasses | supported (decomposed to mutual SubClassOf) |
-| DisjointClasses | parsed, enforcement deferred |
-| DisjointUnion | parsed (union decomposed to SubClassOf, pairwise disjointness deferred) |
+| DisjointClasses | supported (inconsistency detection) |
+| DisjointUnion | supported (union decomposed to SubClassOf, pairwise disjointness checked) |
 | SubObjectPropertyOf | supported (including property chains) |
 | EquivalentObjectProperties | supported (decomposed to mutual SubPropertyOf) |
-| DisjointObjectProperties | parsed, enforcement deferred |
+| DisjointObjectProperties | supported (inconsistency detection) |
 | InverseObjectProperties | supported |
 | FunctionalObjectProperty | supported (equality via owl:sameAs) |
 | InverseFunctionalObjectProperty | supported (equality via owl:sameAs) |
@@ -111,15 +112,14 @@ strix reason data.nt -O ontology.ofn -o inferred.nt --report report.json
 | ObjectIntersectionOf | supported (decomposed: subclass implies each conjunct) |
 | ObjectAllValuesFrom | supported (cls-avf: all property successors get the filler type) |
 | ObjectHasValue | supported (cls-hv2: class membership implies property assertion) |
-| ObjectMaxCardinality 0 | parsed, inconsistency detection deferred |
+| ObjectMaxCardinality 0 | supported (inconsistency detection) |
 | ObjectMaxCardinality 1 | supported (equality via owl:sameAs) |
-| ObjectComplementOf | parsed, inconsistency detection deferred |
+| ObjectComplementOf | supported (inconsistency detection) |
 
 ### Not yet implemented
 
 | Construct | Notes |
 |---|---|
-| Inconsistency detection | DisjointClasses, ComplementOf, MaxCardinality 0, DisjointProperties |
 | IrreflexiveObjectProperty | Deferred |
 | AsymmetricObjectProperty | Deferred |
 | owl:HasKey | Deferred |

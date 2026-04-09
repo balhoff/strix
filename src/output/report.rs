@@ -35,6 +35,13 @@ pub struct ReasoningReport {
     pub fixpoint_reached: bool,
     pub equality_merges: usize,
     pub equality_iterations: usize,
+    pub inconsistencies: Vec<InconsistencyReport>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InconsistencyReport {
+    pub kind: String,
+    pub detail: String,
 }
 
 #[derive(Clone, Debug, Serialize)]

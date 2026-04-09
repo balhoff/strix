@@ -50,6 +50,12 @@ On the 2nd+ call to `inner_fixpoint` (after equality expansion), the seed pass r
 
 **Impact**: Proportional to total known properties × number of equality iterations. Significant only when there are many properties and multiple equality rounds.
 
+## Engine: consolidate store scans in inconsistency checks
+
+`check_disjoint_types` and `check_max_card_zero` each independently scan `known_types_iter`, and `check_disjoint_types` and `check_disjoint_properties` each independently scan `known_properties_iter`. A single pass per relation that dispatches to all relevant checks would halve the I/O.
+
+**Impact**: Proportional to total known facts. Only matters for very large stores where the scan itself is the bottleneck, not the intersection checks.
+
 ## Store: unify BinaryRelation and TernaryRelation via generic Relation\<T\>
 
 ~100 lines of near-identical code between `BinaryRelation` and `TernaryRelation`. Could be unified into `Relation<T>` parameterized over tuple type, with a trait for serialization.

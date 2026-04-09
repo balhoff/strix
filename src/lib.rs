@@ -17,12 +17,15 @@ use clap::{Parser, error::ErrorKind};
 use tracing_subscriber::EnvFilter;
 
 use bench::StageTimer;
-use cli::{Cli, Commands, OutputFormat, ReasonArgs};
+use cli::{Cli, Commands, InconsistencyMode, OutputFormat, ReasonArgs};
 use compile::compile_schema;
 use dict::{Dictionary, WellKnown};
+use engine::inconsistency::{self, Inconsistency};
 use engine::materialize;
 use error::Result;
-use output::report::{InputReport, ReasoningReport, RulesReport, RunReport, StratumReport};
+use output::report::{
+    InconsistencyReport, InputReport, ReasoningReport, RulesReport, RunReport, StratumReport,
+};
 use output::{write_ntriples, write_run_report};
 use owl::{
     ExtractedSchema, RawSchema, ingest_data_triple, load_extracted_schema, load_ontology_path,
@@ -157,6 +160,29 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
     )?;
     let reasoning_time_ms = reasoning_timer.elapsed_ms();
 
+    let inconsistencies = inconsistency::check_inconsistencies(&mut store, &compiled_schema)?;
+    let inconsistency_reports: Vec<InconsistencyReport> = inconsistencies
+        .iter()
+        .map(|inc| format_inconsistency(inc, &dictionary))
+        .collect();
+
+    if !inconsistencies.is_empty() {
+        tracing::warn!(
+            count = inconsistencies.len(),
+            "Detected logical inconsistencies"
+        );
+        for report in &inconsistency_reports {
+            tracing::warn!(kind = %report.kind, "{}", report.detail);
+        }
+        if args.inconsistency_mode == InconsistencyMode::Halt {
+            anyhow::bail!(
+                "{} inconsistenc{} detected (use --inconsistency-mode report to continue)",
+                inconsistencies.len(),
+                if inconsistencies.len() == 1 { "y" } else { "ies" }
+            );
+        }
+    }
+
     tracing::info!("Writing output");
     let export_timer = StageTimer::start();
     let written_triples = write_ntriples(&args.output, args.emit, &dictionary, &mut store)?;
@@ -197,6 +223,7 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
                 fixpoint_reached: reasoning_stats.fixpoint_reached,
                 equality_merges: reasoning_stats.equality_merges,
                 equality_iterations: reasoning_stats.equality_iterations,
+                inconsistencies: inconsistency_reports,
             },
             peak_rss_bytes: if benchmark {
                 bench::peak_rss_bytes()
@@ -213,4 +240,72 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
     tracing::debug!(inferred = reasoning_stats.total_inferred(), "Completed run");
 
     Ok(())
+}
+
+fn format_term(id: dict::TermId, dictionary: &Dictionary) -> String {
+    match dictionary.decode(id) {
+        Some(term) => term.to_ntriples(),
+        None => format!("_{id}"),
+    }
+}
+
+fn format_inconsistency(inc: &Inconsistency, dictionary: &Dictionary) -> InconsistencyReport {
+    match inc {
+        Inconsistency::DisjointClasses {
+            individual,
+            class_a,
+            class_b,
+        } => InconsistencyReport {
+            kind: "DisjointClasses".to_string(),
+            detail: format!(
+                "{} has types {} and {}, which are disjoint",
+                format_term(*individual, dictionary),
+                format_term(*class_a, dictionary),
+                format_term(*class_b, dictionary),
+            ),
+        },
+        Inconsistency::ComplementOf {
+            individual,
+            class,
+            complement,
+        } => InconsistencyReport {
+            kind: "ComplementOf".to_string(),
+            detail: format!(
+                "{} has types {} and {}, which are complements",
+                format_term(*individual, dictionary),
+                format_term(*class, dictionary),
+                format_term(*complement, dictionary),
+            ),
+        },
+        Inconsistency::DisjointProperties {
+            subject,
+            object,
+            prop_a,
+            prop_b,
+        } => InconsistencyReport {
+            kind: "DisjointProperties".to_string(),
+            detail: format!(
+                "({}, {}) appears in both {} and {}, which are disjoint",
+                format_term(*subject, dictionary),
+                format_term(*object, dictionary),
+                format_term(*prop_a, dictionary),
+                format_term(*prop_b, dictionary),
+            ),
+        },
+        Inconsistency::MaxCardinalityZero {
+            individual,
+            class,
+            property,
+            object,
+        } => InconsistencyReport {
+            kind: "MaxCardinalityZero".to_string(),
+            detail: format!(
+                "{} (type {}) has {} link to {}, violating max cardinality 0",
+                format_term(*individual, dictionary),
+                format_term(*class, dictionary),
+                format_term(*property, dictionary),
+                format_term(*object, dictionary),
+            ),
+        },
+    }
 }

@@ -2214,6 +2214,383 @@ FunctionalObjectProperty(:hasMother)
     );
 }
 
+// ─── Inconsistency detection (Step 7) ──────────────────────────────────────
+
+#[test]
+fn disjoint_classes_detected() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let inferred = reason_with_report(
+        "<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Cat> .
+<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Cat))
+Declaration(Class(:Dog))
+DisjointClasses(:Cat :Dog)
+)",
+        &report,
+        &[],
+    );
+    let _ = inferred; // reasoning succeeds in report mode
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("DisjointClasses"),
+        "report should contain disjoint class inconsistency: {report_json}"
+    );
+    assert!(report_json.contains("disjoint"));
+}
+
+#[test]
+fn disjoint_classes_halt_mode() {
+    let result = reason_expecting_result(
+        "<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Cat> .
+<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Cat))
+Declaration(Class(:Dog))
+DisjointClasses(:Cat :Dog)
+)",
+        &["--inconsistency-mode", "halt"],
+    );
+    assert!(result.is_err(), "halt mode should return error on inconsistency");
+    let msg = format!("{}", result.unwrap_err());
+    assert!(msg.contains("inconsisten"), "error should mention inconsistency: {msg}");
+}
+
+#[test]
+fn disjoint_classes_no_conflict() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> .
+<http://x.com/whiskers> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Cat> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Cat))
+Declaration(Class(:Dog))
+DisjointClasses(:Cat :Dog)
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("\"inconsistencies\": []"),
+        "no inconsistencies expected: {report_json}"
+    );
+}
+
+#[test]
+fn complement_of_detected() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Mortal> .
+<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Immortal> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Mortal))
+Declaration(Class(:Immortal))
+SubClassOf(:Mortal ObjectComplementOf(:Immortal))
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("ComplementOf"),
+        "should detect complement inconsistency: {report_json}"
+    );
+}
+
+#[test]
+fn disjoint_properties_detected() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/a> <http://x.com/likes> <http://x.com/b> .
+<http://x.com/a> <http://x.com/dislikes> <http://x.com/b> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:likes))
+Declaration(ObjectProperty(:dislikes))
+DisjointObjectProperties(:likes :dislikes)
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("DisjointProperties"),
+        "should detect disjoint properties inconsistency: {report_json}"
+    );
+}
+
+#[test]
+fn max_cardinality_zero_detected() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Childless> .
+<http://x.com/alice> <http://x.com/hasChild> <http://x.com/bob> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:hasChild))
+Declaration(Class(:Childless))
+SubClassOf(:Childless ObjectMaxCardinality(0 :hasChild))
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("MaxCardinalityZero"),
+        "should detect max card 0 inconsistency: {report_json}"
+    );
+}
+
+#[test]
+fn disjoint_classes_inferred_conflict() {
+    // Conflict arises through inference: fido is Dog, Dog subClassOf Animal,
+    // Animal disjoint with Machine, fido also typed Machine.
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> .
+<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Machine> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Dog))
+Declaration(Class(:Animal))
+Declaration(Class(:Machine))
+SubClassOf(:Dog :Animal)
+DisjointClasses(:Animal :Machine)
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("DisjointClasses"),
+        "should detect inferred disjoint conflict: {report_json}"
+    );
+}
+
+#[test]
+fn disjoint_classes_nary() {
+    // Three-way disjointness: conflict between non-adjacent members A and C.
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .
+<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:A))
+Declaration(Class(:B))
+Declaration(Class(:C))
+DisjointClasses(:A :B :C)
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("DisjointClasses"),
+        "n-ary disjoint should detect conflict between non-adjacent members: {report_json}"
+    );
+}
+
+#[test]
+fn max_cardinality_zero_with_filler() {
+    // MaxCard(0, P, C) with filler class: violation only when object has the filler type.
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Vegan> .
+<http://x.com/alice> <http://x.com/eats> <http://x.com/steak> .
+<http://x.com/steak> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Meat> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Vegan))
+Declaration(Class(:Meat))
+Declaration(ObjectProperty(:eats))
+SubClassOf(:Vegan ObjectMaxCardinality(0 :eats :Meat))
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("MaxCardinalityZero"),
+        "max card 0 with matching filler should detect inconsistency: {report_json}"
+    );
+}
+
+#[test]
+fn max_cardinality_zero_filler_no_match() {
+    // MaxCard(0, P, C): no violation when the object does NOT have the filler type.
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Vegan> .
+<http://x.com/alice> <http://x.com/eats> <http://x.com/salad> .
+<http://x.com/salad> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Vegetable> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Vegan))
+Declaration(Class(:Meat))
+Declaration(Class(:Vegetable))
+Declaration(ObjectProperty(:eats))
+SubClassOf(:Vegan ObjectMaxCardinality(0 :eats :Meat))
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("\"inconsistencies\": []"),
+        "max card 0 with non-matching filler should not be inconsistent: {report_json}"
+    );
+}
+
+#[test]
+fn disjoint_properties_via_subproperty() {
+    // Conflict arises through inference: :knows subPropertyOf :relatedTo,
+    // :relatedTo disjointWith :unrelatedTo.
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/a> <http://x.com/knows> <http://x.com/b> .
+<http://x.com/a> <http://x.com/unrelatedTo> <http://x.com/b> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:knows))
+Declaration(ObjectProperty(:relatedTo))
+Declaration(ObjectProperty(:unrelatedTo))
+SubObjectPropertyOf(:knows :relatedTo)
+DisjointObjectProperties(:relatedTo :unrelatedTo)
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("DisjointProperties"),
+        "disjoint properties via subproperty inference should be detected: {report_json}"
+    );
+}
+
+#[test]
+fn complement_of_via_inference() {
+    // One type is inferred through subclass chain.
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Alive> .
+<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Rock> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Alive))
+Declaration(Class(:Inorganic))
+Declaration(Class(:Rock))
+SubClassOf(:Rock :Inorganic)
+SubClassOf(:Alive ObjectComplementOf(:Inorganic))
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("ComplementOf"),
+        "complement conflict via inferred type should be detected: {report_json}"
+    );
+}
+
+#[test]
+fn disjoint_union() {
+    // DisjointUnion(:Animal :Cat :Dog) should:
+    // 1. Infer SubClassOf(:Cat, :Animal) and SubClassOf(:Dog, :Animal)
+    // 2. Detect disjointness between :Cat and :Dog
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let inferred = reason_with_report(
+        "\
+<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> .
+<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Cat> .
+<http://x.com/rex> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Animal))
+Declaration(Class(:Cat))
+Declaration(Class(:Dog))
+DisjointUnion(:Animal :Cat :Dog)
+)",
+        &report,
+        &[],
+    );
+    // rex should be inferred as Animal via SubClassOf(Dog, Animal)
+    assert!(
+        inferred.contains("<http://x.com/rex>") && inferred.contains("<http://x.com/Animal>"),
+        "DisjointUnion should infer subclass membership: {inferred}"
+    );
+    // fido is both Cat and Dog, which are disjoint members
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("DisjointClasses"),
+        "DisjointUnion should detect disjointness between members: {report_json}"
+    );
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn write(path: &Path, content: &str) {
@@ -2295,4 +2672,60 @@ fn write_xz(path: &Path, content: &str) {
         .write_all(content.as_bytes())
         .expect("xz test fixture should be written");
     encoder.finish().expect("xz encoder should finish");
+}
+
+/// Like `reason` but also writes a report and accepts extra CLI args.
+fn reason_with_report(data: &str, ontology: &str, report_path: &Path, extra_args: &[&str]) -> String {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data_path = temp_dir.path().join("data.nt");
+    let ontology_path = temp_dir.path().join("ontology.ofn");
+    let output_path = temp_dir.path().join("inferred.nt");
+
+    write(&data_path, data);
+    write(&ontology_path, ontology);
+
+    let mut args = vec![
+        "strix".to_string(),
+        "reason".to_string(),
+        data_path.to_str().unwrap().to_string(),
+        "--ontology".to_string(),
+        ontology_path.to_str().unwrap().to_string(),
+        "--output".to_string(),
+        output_path.to_str().unwrap().to_string(),
+        "--report".to_string(),
+        report_path.to_str().unwrap().to_string(),
+    ];
+    for arg in extra_args {
+        args.push(arg.to_string());
+    }
+
+    strix::run(args).expect("reasoning run should succeed");
+
+    fs::read_to_string(&output_path).expect("output should exist")
+}
+
+/// Like `reason` but returns the Result instead of unwrapping.
+fn reason_expecting_result(data: &str, ontology: &str, extra_args: &[&str]) -> anyhow::Result<()> {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data_path = temp_dir.path().join("data.nt");
+    let ontology_path = temp_dir.path().join("ontology.ofn");
+    let output_path = temp_dir.path().join("inferred.nt");
+
+    write(&data_path, data);
+    write(&ontology_path, ontology);
+
+    let mut args = vec![
+        "strix".to_string(),
+        "reason".to_string(),
+        data_path.to_str().unwrap().to_string(),
+        "--ontology".to_string(),
+        ontology_path.to_str().unwrap().to_string(),
+        "--output".to_string(),
+        output_path.to_str().unwrap().to_string(),
+    ];
+    for arg in extra_args {
+        args.push(arg.to_string());
+    }
+
+    strix::run(args)
 }

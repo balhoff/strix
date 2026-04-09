@@ -84,12 +84,24 @@ pub struct ReasonArgs {
     /// Safety cap on ABox fixpoint rounds
     #[arg(long, value_name = "N")]
     pub max_iterations: Option<usize>,
+
+    /// How to handle detected inconsistencies
+    #[arg(long, value_enum, default_value_t = InconsistencyMode::Report)]
+    pub inconsistency_mode: InconsistencyMode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum EmitMode {
     Inferred,
     Closure,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum InconsistencyMode {
+    /// Log warnings and include in run report
+    Report,
+    /// Return an error and stop
+    Halt,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -177,7 +189,7 @@ mod tests {
 
     use clap::{Parser, error::ErrorKind};
 
-    use super::{Cli, Commands, EmitMode, MemorySize, OutputFormat};
+    use super::{Cli, Commands, EmitMode, InconsistencyMode, MemorySize, OutputFormat};
 
     #[test]
     fn parses_reason_command_with_defaults() {
@@ -201,6 +213,7 @@ mod tests {
                 assert_eq!(args.memory_budget, MemorySize(4 * 1024_u64.pow(3)));
                 assert_eq!(args.report, None);
                 assert_eq!(args.max_iterations, None);
+                assert_eq!(args.inconsistency_mode, InconsistencyMode::Report);
             }
         }
     }

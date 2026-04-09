@@ -1,3 +1,4 @@
+pub mod inconsistency;
 pub mod sameas;
 
 use std::collections::BTreeMap;

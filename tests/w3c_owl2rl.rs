@@ -192,7 +192,6 @@ SubObjectPropertyOf(ObjectPropertyChain(:linksTo :extends) :linksTo)
 /// DisjointClasses(:Circle :Triangle), ClassAssertion(:Circle :shape1)
 /// ⊨ :shape1 is not a Triangle (complementOf)
 #[test]
-#[ignore = "Step 7: inconsistency detection not yet implemented"]
 fn w3c_disjoint_classes_001() {
     let inferred = reason(
         "\
@@ -218,7 +217,6 @@ DisjointClasses(:Circle :Triangle)
 /// DisjointClasses(:Circle :Triangle :Square), ClassAssertion(:Circle :shape1)
 /// ⊨ :shape1 is neither Triangle nor Square
 #[test]
-#[ignore = "Step 7: inconsistency detection not yet implemented"]
 fn w3c_disjoint_classes_003() {
     let inferred = reason(
         "\
@@ -250,7 +248,7 @@ DisjointClasses(:Circle :Triangle :Square)
 /// :x :above :y . :x :below :z .
 /// ⊨ DifferentIndividuals(:y :z)
 #[test]
-#[ignore = "Step 7: disjoint properties + differentFrom not yet implemented"]
+#[ignore = "DifferentIndividuals inference not yet implemented"]
 fn w3c_disjoint_object_properties_001() {
     let inferred = reason(
         "\
@@ -279,7 +277,6 @@ DisjointObjectProperties(:above :below)
 /// DisjointClasses(:Circle :Triangle)
 /// :shape1 type Circle, :shape1 type Triangle → INCONSISTENT
 #[test]
-#[ignore = "Step 7: inconsistency detection not yet implemented"]
 fn w3c_disjoint_classes_002_inconsistency() {
     let is_inconsistent = reason_expect_inconsistency(
         "\
@@ -554,7 +551,7 @@ fn w3c_keys_003_same_individual() {
 /// :src2 type :DomesticSource, DifferentIndividuals(:src1 :src2)
 /// ⊨ :src1 is not a DomesticSource (complementOf)
 #[test]
-#[ignore = "Step 6-7: max cardinality equality + inconsistency detection not yet implemented"]
+#[ignore = "DifferentIndividuals inference not yet implemented"]
 fn w3c_qualified_max_cardinality_002() {
     let inferred = reason(
         "\
