@@ -67,6 +67,14 @@ pub struct CompiledSchema {
     pub irreflexive_properties: BTreeSet<TermId>,
     pub asymmetric_properties: BTreeSet<TermId>,
 
+    // Individual axioms (Phase 3)
+    pub same_individual_pairs: Vec<(TermId, TermId)>,
+    pub different_individual_pairs: Vec<(TermId, TermId)>,
+
+    // Negative assertions (Phase 3)
+    /// (property, subject, object) — combined from NegativeOPA + NegativeDPA
+    pub negative_property_assertions: Vec<(TermId, TermId, TermId)>,
+
     /// Predicates that require in-memory indexing for join evaluation.
     pub indexed_predicates: BTreeSet<TermId>,
     /// Classes that require in-memory indexing for join evaluation.
@@ -309,6 +317,14 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
         max_card_zero,
         irreflexive_properties: schema.irreflexive_properties.clone(),
         asymmetric_properties: schema.asymmetric_properties.clone(),
+        same_individual_pairs: flatten_pairwise(&schema.same_individuals),
+        different_individual_pairs: flatten_pairwise(&schema.different_individuals),
+        negative_property_assertions: schema
+            .negative_object_property_assertions
+            .iter()
+            .chain(schema.negative_data_property_assertions.iter())
+            .copied()
+            .collect(),
         indexed_predicates,
         indexed_classes,
         schema_iterations: subclass_iterations.max(subproperty_iterations),

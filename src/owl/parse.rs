@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use horned_owl::io::{ParserConfiguration, ofn, owx, rdf};
 use horned_owl::model::{
-    ClassExpression, Component, Individual, ObjectPropertyExpression, RcStr,
+    ClassExpression, Component, Individual, Literal, ObjectPropertyExpression, RcStr,
     SubObjectPropertyExpression,
 };
 use horned_owl::ontology::set::SetOntology;
@@ -16,7 +16,7 @@ use crate::dict::{Dictionary, TermId};
 use anyhow::Context;
 
 use crate::error::Result;
-use crate::rdf::Triple;
+use crate::rdf::{Literal as RdfLiteral, Term as RdfTerm, Triple};
 
 use super::{ExtractedSchema, RawSchema};
 
@@ -645,13 +645,39 @@ fn absorb_ontology(
 
             // Assertions — silently accepted (they're ABox, not TBox rules)
             Component::AnnotationAssertion(_) => {}
-            Component::SameIndividual(_)
-            | Component::DifferentIndividuals(_)
-            | Component::ClassAssertion(_)
+            Component::SameIndividual(axiom) => {
+                if let Some(ids) = encode_individual_group(&axiom.0, dictionary) {
+                    schema.same_individuals.push(ids);
+                }
+            }
+            Component::DifferentIndividuals(axiom) => {
+                if let Some(ids) = encode_individual_group(&axiom.0, dictionary) {
+                    schema.different_individuals.push(ids);
+                }
+            }
+            Component::NegativeObjectPropertyAssertion(axiom) => {
+                if let (Ok(prop), Ok(from), Ok(to)) = (
+                    encode_named_object_property(&axiom.ope, dictionary),
+                    encode_individual(&axiom.from, dictionary),
+                    encode_individual(&axiom.to, dictionary),
+                ) {
+                    schema
+                        .negative_object_property_assertions
+                        .push((prop, from, to));
+                }
+            }
+            Component::NegativeDataPropertyAssertion(axiom) => {
+                if let Ok(from) = encode_individual(&axiom.from, dictionary) {
+                    let prop = dictionary.encode_iri(axiom.dp.as_ref());
+                    let value = dictionary.encode(encode_horned_literal(&axiom.to));
+                    schema
+                        .negative_data_property_assertions
+                        .push((prop, from, value));
+                }
+            }
+            Component::ClassAssertion(_)
             | Component::ObjectPropertyAssertion(_)
-            | Component::NegativeObjectPropertyAssertion(_)
-            | Component::DataPropertyAssertion(_)
-            | Component::NegativeDataPropertyAssertion(_) => {}
+            | Component::DataPropertyAssertion(_) => {}
 
             // Deferred
             Component::Import(_) => {
@@ -926,6 +952,18 @@ fn encode_individual(
     }
 }
 
+/// Encode a list of individuals, returning `Some(ids)` if at least 2 succeed.
+fn encode_individual_group(
+    individuals: &[Individual<RcStr>],
+    dictionary: &mut Dictionary,
+) -> Option<Vec<TermId>> {
+    let ids: Vec<TermId> = individuals
+        .iter()
+        .filter_map(|ind| encode_individual(ind, dictionary).ok())
+        .collect();
+    (ids.len() >= 2).then_some(ids)
+}
+
 fn serialize_triples_to_ntriples(triples: &[Triple]) -> Vec<u8> {
     let mut output = Vec::new();
     for triple in triples {
@@ -962,6 +1000,28 @@ fn encode_named_object_property(
     }
 }
 
+fn encode_horned_literal(lit: &Literal<RcStr>) -> RdfTerm {
+    match lit {
+        Literal::Simple { literal } => RdfTerm::Literal(RdfLiteral {
+            lexical_form: literal.clone(),
+            language: None,
+            datatype: Some(super::XSD_STRING_IRI.to_string()),
+        }),
+        Literal::Language { literal, lang } => RdfTerm::Literal(RdfLiteral {
+            lexical_form: literal.clone(),
+            language: Some(lang.clone()),
+            datatype: Some(super::RDF_LANG_STRING_IRI.to_string()),
+        }),
+        Literal::Datatype {
+            literal,
+            datatype_iri,
+        } => RdfTerm::Literal(RdfLiteral {
+            lexical_form: literal.clone(),
+            language: None,
+            datatype: Some(datatype_iri.to_string()),
+        }),
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -22,6 +22,8 @@ pub const OWL_DATATYPE_PROPERTY_IRI: &str = "http://www.w3.org/2002/07/owl#Datat
 pub const OWL_SAME_AS_IRI: &str = "http://www.w3.org/2002/07/owl#sameAs";
 pub const OWL_THING_IRI: &str = "http://www.w3.org/2002/07/owl#Thing";
 pub const OWL_NOTHING_IRI: &str = "http://www.w3.org/2002/07/owl#Nothing";
+pub const XSD_STRING_IRI: &str = "http://www.w3.org/2001/XMLSchema#string";
+pub const RDF_LANG_STRING_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
 
 #[derive(Debug, Default)]
 pub struct RawSchema {
@@ -67,6 +69,16 @@ pub struct RawSchema {
     pub irreflexive_properties: BTreeSet<TermId>,
     pub asymmetric_properties: BTreeSet<TermId>,
 
+    // Individual axioms
+    pub same_individuals: Vec<Vec<TermId>>,
+    pub different_individuals: Vec<Vec<TermId>>,
+
+    // Negative assertions
+    /// (property, subject, object) — NegativeObjectPropertyAssertion
+    pub negative_object_property_assertions: Vec<(TermId, TermId, TermId)>,
+    /// (property, subject, value) — NegativeDataPropertyAssertion
+    pub negative_data_property_assertions: Vec<(TermId, TermId, TermId)>,
+
     unsupported: BTreeSet<String>,
 }
 
@@ -95,6 +107,10 @@ impl RawSchema {
             + self.disjoint_properties.len()
             + self.irreflexive_properties.len()
             + self.asymmetric_properties.len()
+            + self.same_individuals.len()
+            + self.different_individuals.len()
+            + self.negative_object_property_assertions.len()
+            + self.negative_data_property_assertions.len()
     }
 
     pub fn unsupported_constructs(&self) -> Vec<String> {

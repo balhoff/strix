@@ -248,7 +248,7 @@ DisjointClasses(:Circle :Triangle :Square)
 /// :x :above :y . :x :below :z .
 /// ⊨ DifferentIndividuals(:y :z)
 #[test]
-#[ignore = "DifferentIndividuals inference not yet implemented"]
+#[ignore = "requires DifferentIndividuals inference from disjoint properties (production rule not yet implemented)"]
 fn w3c_disjoint_object_properties_001() {
     let inferred = reason(
         "\
@@ -355,7 +355,6 @@ IrreflexiveObjectProperty(:strictlyLargerThan)
 /// ObjectPropertyAssertion(:produces :factory1 :widget1)
 /// → INCONSISTENT
 #[test]
-#[ignore = "NegativeObjectPropertyAssertion deferred"]
 fn w3c_negative_object_property_assertion_001_inconsistency() {
     let is_inconsistent = reason_expect_inconsistency(
         "\
@@ -549,7 +548,6 @@ fn w3c_keys_003_same_individual() {
 /// :src2 type :DomesticSource, DifferentIndividuals(:src1 :src2)
 /// ⊨ :src1 is not a DomesticSource (complementOf)
 #[test]
-#[ignore = "DifferentIndividuals inference not yet implemented"]
 fn w3c_qualified_max_cardinality_002() {
     let inferred = reason(
         "\

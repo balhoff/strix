@@ -11,6 +11,8 @@ use crate::store::delta::difference_streaming_into;
 use crate::store::merge::{MergeBinaryIter, MergeTernaryIter};
 use crate::store::relation::{BinaryRelation, TernaryRelation};
 
+pub use sameas::UnionFind;
+
 #[derive(Clone, Debug, Default)]
 pub struct ReasoningStats {
     pub iterations: usize,
@@ -25,6 +27,11 @@ impl ReasoningStats {
     pub fn total_inferred(&self) -> usize {
         self.inferred_types + self.inferred_properties
     }
+}
+
+pub struct MaterializeResult {
+    pub stats: ReasoningStats,
+    pub union_find: UnionFind,
 }
 
 // ─── In-memory index for join-requiring rules ───────────────────────────────
@@ -389,7 +396,6 @@ fn apply_property_join_rules(
 
 // ─── Equality evaluation ───────────────────────────────────────────────────
 
-use sameas::UnionFind;
 use std::collections::HashMap;
 
 /// Scan known facts for equality-producing rule firings.
@@ -622,7 +628,7 @@ pub fn materialize(
     max_iterations: Option<usize>,
     engine_budget: usize,
     owl_same_as: TermId,
-) -> Result<ReasoningStats> {
+) -> Result<MaterializeResult> {
     let mut stats = ReasoningStats::default();
     let relation_budget = engine_budget / 4;
     let work_dir = store.work_dir().to_path_buf();
@@ -631,6 +637,25 @@ pub fn materialize(
     let mut candidate_properties =
         TernaryRelation::new(&work_dir, "engine-cand-props", relation_budget);
     let mut union_find = UnionFind::new();
+
+    // Seed from SameIndividual axioms (once, before the fixpoint loop).
+    {
+        let mut seeded = 0usize;
+        for &(a, b) in &schema.same_individual_pairs {
+            if union_find.union(a, b) {
+                seeded += 1;
+            }
+        }
+        if seeded > 0 {
+            stats.equality_merges += seeded;
+            generate_equality_candidates(
+                store,
+                &mut union_find,
+                &mut candidate_types,
+                &mut candidate_properties,
+            )?;
+        }
+    }
 
     // Outer equality fixpoint: run inner fixpoint, check for new equalities
     // (from FunctionalProperty, InverseFunctionalProperty, MaxCardinality 1,
@@ -675,7 +700,7 @@ pub fn materialize(
     }
 
     stats.fixpoint_reached = true;
-    Ok(stats)
+    Ok(MaterializeResult { stats, union_find })
 }
 
 /// Run the inner (non-equality) fixpoint to completion.

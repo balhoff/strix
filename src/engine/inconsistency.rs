@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::compile::CompiledSchema;
 use crate::dict::TermId;
+use crate::engine::sameas::UnionFind;
 use crate::error::Result;
 use crate::store::FactStore;
 
@@ -39,6 +40,15 @@ pub enum Inconsistency {
         object: TermId,
         property: TermId,
     },
+    DifferentIndividuals {
+        individual_a: TermId,
+        individual_b: TermId,
+    },
+    NegativePropertyAssertion {
+        subject: TermId,
+        property: TermId,
+        object: TermId,
+    },
 }
 
 /// Check the fully materialized store for logical inconsistencies.
@@ -48,6 +58,7 @@ pub enum Inconsistency {
 pub fn check_inconsistencies(
     store: &mut FactStore,
     schema: &CompiledSchema,
+    union_find: Option<&mut UnionFind>,
 ) -> Result<Vec<Inconsistency>> {
     let mut results = Vec::new();
 
@@ -56,6 +67,10 @@ pub fn check_inconsistencies(
     check_max_card_zero(store, schema, &mut results)?;
     check_irreflexive_properties(store, schema, &mut results)?;
     check_asymmetric_properties(store, schema, &mut results)?;
+    check_negative_property_assertions(store, schema, &mut results)?;
+    if let Some(uf) = union_find {
+        check_different_individuals(schema, uf, &mut results);
+    }
 
     Ok(results)
 }
@@ -309,4 +324,58 @@ fn check_asymmetric_properties(
     }
 
     Ok(())
+}
+
+/// Check NegativeObjectPropertyAssertion / NegativeDataPropertyAssertion constraints.
+///
+/// If the negated triple (s, P, o) exists in the materialized store, that's an inconsistency.
+fn check_negative_property_assertions(
+    store: &mut FactStore,
+    schema: &CompiledSchema,
+    results: &mut Vec<Inconsistency>,
+) -> Result<()> {
+    if schema.negative_property_assertions.is_empty() {
+        return Ok(());
+    }
+
+    let relevant_props: BTreeSet<TermId> = schema
+        .negative_property_assertions
+        .iter()
+        .map(|&(p, _, _)| p)
+        .collect();
+
+    let prop_assertions = collect_property_assertions(store, &relevant_props)?;
+
+    for &(prop, subj, obj) in &schema.negative_property_assertions {
+        if let Some(pairs) = prop_assertions.get(&prop)
+            && pairs.contains(&(subj, obj))
+        {
+            results.push(Inconsistency::NegativePropertyAssertion {
+                subject: subj,
+                property: prop,
+                object: obj,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Check DifferentIndividuals constraints.
+///
+/// If two individuals declared different ended up in the same equivalence
+/// class (via owl:sameAs or equality-producing rules), that's an inconsistency.
+fn check_different_individuals(
+    schema: &CompiledSchema,
+    union_find: &mut UnionFind,
+    results: &mut Vec<Inconsistency>,
+) {
+    for &(a, b) in &schema.different_individual_pairs {
+        if union_find.canonical(a) == union_find.canonical(b) {
+            results.push(Inconsistency::DifferentIndividuals {
+                individual_a: a,
+                individual_b: b,
+            });
+        }
+    }
 }

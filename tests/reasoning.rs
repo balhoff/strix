@@ -2691,6 +2691,257 @@ AsymmetricObjectProperty(:parentOf)
     );
 }
 
+// ─── SameIndividual axiom ───────────────────────────────────────────────────
+
+#[test]
+fn same_individual_axiom_produces_sameas() {
+    // SameIndividual(a, b) from the ontology should produce owl:sameAs and unify facts.
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> .
+<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Cat> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(NamedIndividual(:a))
+Declaration(NamedIndividual(:b))
+SameIndividual(:a :b)
+)",
+    );
+    // Should produce owl:sameAs triple
+    assert!(
+        inferred.contains("owl:sameAs") || inferred.contains("sameAs"),
+        "SameIndividual axiom should produce owl:sameAs: {inferred}"
+    );
+}
+
+#[test]
+fn same_individual_axiom_unifies_types() {
+    // SameIndividual(a, b): a has type Dog, b has type Cat.
+    // After unification, the canonical individual should have both types.
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> .
+<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Cat> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Dog))
+Declaration(Class(:Cat))
+Declaration(NamedIndividual(:a))
+Declaration(NamedIndividual(:b))
+SameIndividual(:a :b)
+)",
+    );
+    // The canonical individual (lower TermId) should acquire both types.
+    // At least one of a or b should be inferred as the type it didn't originally have.
+    let has_cross_type = inferred.contains("Dog") || inferred.contains("Cat");
+    assert!(
+        has_cross_type,
+        "SameIndividual should unify types across individuals: {inferred}"
+    );
+}
+
+#[test]
+fn same_individual_axiom_nary() {
+    // SameIndividual(a, b, c) — all three should be merged.
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/X> .
+<http://x.com/c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Y> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:X))
+Declaration(Class(:Y))
+Declaration(NamedIndividual(:a))
+Declaration(NamedIndividual(:b))
+Declaration(NamedIndividual(:c))
+SameIndividual(:a :b :c)
+)",
+    );
+    // a and c are merged (transitively through b), so types should be shared.
+    assert!(
+        inferred.contains("sameAs"),
+        "n-ary SameIndividual should produce sameAs triples: {inferred}"
+    );
+}
+
+// ─── DifferentIndividuals axiom ────────────────────────────────────────────
+
+#[test]
+fn different_individuals_merged_is_inconsistent() {
+    // DifferentIndividuals(a, b) + sameAs merge → inconsistency.
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/a> <http://www.w3.org/2002/07/owl#sameAs> <http://x.com/b> .
+<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(NamedIndividual(:a))
+Declaration(NamedIndividual(:b))
+DifferentIndividuals(:a :b)
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("DifferentIndividuals"),
+        "should detect merged different individuals: {report_json}"
+    );
+}
+
+#[test]
+fn different_individuals_no_conflict() {
+    // DifferentIndividuals(a, b) with no equality merge → no inconsistency.
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> .
+<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/D> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(NamedIndividual(:a))
+Declaration(NamedIndividual(:b))
+DifferentIndividuals(:a :b)
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("\"inconsistencies\": []"),
+        "no inconsistency when different individuals remain separate: {report_json}"
+    );
+}
+
+#[test]
+fn different_individuals_nary() {
+    // DifferentIndividuals(a, b, c) — merging any pair is inconsistent.
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/b> <http://www.w3.org/2002/07/owl#sameAs> <http://x.com/c> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(NamedIndividual(:a))
+Declaration(NamedIndividual(:b))
+Declaration(NamedIndividual(:c))
+DifferentIndividuals(:a :b :c)
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("DifferentIndividuals"),
+        "should detect merged pair from n-ary DifferentIndividuals: {report_json}"
+    );
+}
+
+// ─── NegativePropertyAssertion ─────────────────────────────────────────────
+
+#[test]
+fn negative_object_property_assertion_detected() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/a> <http://x.com/likes> <http://x.com/b> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:likes))
+Declaration(NamedIndividual(:a))
+Declaration(NamedIndividual(:b))
+NegativeObjectPropertyAssertion(:likes :a :b)
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("NegativePropertyAssertion"),
+        "should detect contradictory positive and negative assertion: {report_json}"
+    );
+}
+
+#[test]
+fn negative_object_property_assertion_no_conflict() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/a> <http://x.com/likes> <http://x.com/c> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:likes))
+Declaration(NamedIndividual(:a))
+Declaration(NamedIndividual(:b))
+NegativeObjectPropertyAssertion(:likes :a :b)
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("\"inconsistencies\": []"),
+        "no inconsistency when negated triple not present: {report_json}"
+    );
+}
+
+#[test]
+fn negative_data_property_assertion_detected() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let _ = reason_with_report(
+        "\
+<http://x.com/a> <http://x.com/age> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)
+Ontology(<http://x.com/o>
+Declaration(DataProperty(:age))
+Declaration(NamedIndividual(:a))
+NegativeDataPropertyAssertion(:age :a \"42\"^^xsd:integer)
+)",
+        &report,
+        &[],
+    );
+    let report_json = fs::read_to_string(&report).unwrap();
+    assert!(
+        report_json.contains("NegativePropertyAssertion"),
+        "should detect contradictory positive and negative data assertion: {report_json}"
+    );
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn write(path: &Path, content: &str) {

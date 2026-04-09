@@ -21,7 +21,7 @@ use cli::{Cli, Commands, InconsistencyMode, OutputFormat, ReasonArgs};
 use compile::compile_schema;
 use dict::{Dictionary, WellKnown};
 use engine::inconsistency::{self, Inconsistency};
-use engine::materialize;
+use engine::{MaterializeResult, materialize};
 use error::Result;
 use output::report::{
     InconsistencyReport, InputReport, ReasoningReport, RulesReport, RunReport, StratumReport,
@@ -151,7 +151,10 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
 
     tracing::info!("Materializing inferences");
     let reasoning_timer = StageTimer::start();
-    let reasoning_stats = materialize(
+    let MaterializeResult {
+        stats: reasoning_stats,
+        mut union_find,
+    } = materialize(
         &mut store,
         &compiled_schema,
         args.max_iterations,
@@ -160,7 +163,11 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
     )?;
     let reasoning_time_ms = reasoning_timer.elapsed_ms();
 
-    let inconsistencies = inconsistency::check_inconsistencies(&mut store, &compiled_schema)?;
+    let inconsistencies = inconsistency::check_inconsistencies(
+        &mut store,
+        &compiled_schema,
+        Some(&mut union_find),
+    )?;
     let inconsistency_reports: Vec<InconsistencyReport> = inconsistencies
         .iter()
         .map(|inc| format_inconsistency(inc, &dictionary))
@@ -329,6 +336,30 @@ fn format_inconsistency(inc: &Inconsistency, dictionary: &Dictionary) -> Inconsi
                 format_term(*subject, dictionary),
                 format_term(*object, dictionary),
                 format_term(*property, dictionary),
+            ),
+        },
+        Inconsistency::DifferentIndividuals {
+            individual_a,
+            individual_b,
+        } => InconsistencyReport {
+            kind: "DifferentIndividuals".to_string(),
+            detail: format!(
+                "{} and {} are declared different but were merged by equality reasoning",
+                format_term(*individual_a, dictionary),
+                format_term(*individual_b, dictionary),
+            ),
+        },
+        Inconsistency::NegativePropertyAssertion {
+            subject,
+            property,
+            object,
+        } => InconsistencyReport {
+            kind: "NegativePropertyAssertion".to_string(),
+            detail: format!(
+                "({}, {}, {}) is asserted but negated by a negative property assertion",
+                format_term(*subject, dictionary),
+                format_term(*property, dictionary),
+                format_term(*object, dictionary),
             ),
         },
     }
