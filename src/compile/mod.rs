@@ -67,6 +67,12 @@ pub struct CompiledSchema {
     pub irreflexive_properties: BTreeSet<TermId>,
     pub asymmetric_properties: BTreeSet<TermId>,
 
+    // Equality-producing axioms (Phase 3)
+    /// (class, [key_properties]) — HasKey(C, [P1,...,Pn])
+    pub has_key: Vec<(TermId, Vec<TermId>)>,
+    /// All predicates appearing in any HasKey axiom (for fast scan filtering).
+    pub has_key_preds: BTreeSet<TermId>,
+
     // Individual axioms (Phase 3)
     pub same_individual_pairs: Vec<(TermId, TermId)>,
     pub different_individual_pairs: Vec<(TermId, TermId)>,
@@ -280,10 +286,14 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
     }
     indexed_predicates.extend(some_values_from_by_prop.keys());
     indexed_predicates.extend(all_values_from_by_prop.keys());
+    for (_, key_props) in &schema.has_key {
+        indexed_predicates.extend(key_props);
+    }
 
     // Classes needing in-memory indexing for join-based rules.
     let mut indexed_classes: BTreeSet<TermId> = BTreeSet::new();
     indexed_classes.extend(some_values_from_by_filler.keys());
+    indexed_classes.extend(schema.has_key.iter().map(|(cls, _)| cls));
     indexed_classes.extend(all_values_from_by_class.keys());
     indexed_classes.extend(intersection_conjuncts.values().flatten());
 
@@ -317,6 +327,8 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
         max_card_zero,
         irreflexive_properties: schema.irreflexive_properties.clone(),
         asymmetric_properties: schema.asymmetric_properties.clone(),
+        has_key_preds: schema.has_key.iter().flat_map(|(_, ps)| ps.iter().copied()).collect(),
+        has_key: schema.has_key.clone(),
         same_individual_pairs: flatten_pairwise(&schema.same_individuals),
         different_individual_pairs: flatten_pairwise(&schema.different_individuals),
         negative_property_assertions: schema

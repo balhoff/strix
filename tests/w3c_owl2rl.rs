@@ -536,9 +536,27 @@ InverseFunctionalObjectProperty(:hasSSN)
 /// :car2 hasVIN "ABC123", type RegisteredVehicle
 /// ⊨ SameIndividual(:car1 :car2)
 #[test]
-#[ignore = "HasKey not in Phase 2 scope"]
 fn w3c_keys_003_same_individual() {
-    // HasKey requires dedicated engine support not in current plan
+    let inferred = reason(
+        "\
+<http://example.org/car1> <http://example.org/hasVIN> \"ABC123\" .
+<http://example.org/car1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.org/RegisteredVehicle> .
+<http://example.org/car2> <http://example.org/hasVIN> \"ABC123\" .
+<http://example.org/car2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.org/RegisteredVehicle> .
+",
+        "\
+Prefix(:=<http://example.org/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://example.org/ontology>
+Declaration(Class(:RegisteredVehicle))
+Declaration(DataProperty(:hasVIN))
+HasKey(:RegisteredVehicle () (:hasVIN))
+)",
+    );
+    assert!(
+        inferred.contains("sameAs"),
+        "HasKey should merge car1 and car2 via shared VIN: {inferred}"
+    );
 }
 
 /// Derived from W3C: New-Feature-ObjectQCR-002

@@ -2942,6 +2942,137 @@ NegativeDataPropertyAssertion(:age :a \"42\"^^xsd:integer)
     );
 }
 
+// ─── HasKey ────────────────────────────────────────────────────────────────
+
+#[test]
+fn has_key_produces_sameas() {
+    // HasKey(C, [P]): two instances of C with same P value are merged.
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Person> .
+<http://x.com/a> <http://x.com/ssn> \"123\" .
+<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Person> .
+<http://x.com/b> <http://x.com/ssn> \"123\" .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Person))
+Declaration(DataProperty(:ssn))
+HasKey(:Person () (:ssn))
+)",
+    );
+    assert!(
+        inferred.contains("sameAs"),
+        "HasKey should merge instances with same key: {inferred}"
+    );
+}
+
+#[test]
+fn has_key_no_merge_different_values() {
+    // HasKey(C, [P]): different P values → no merge.
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report = temp_dir.path().join("report.json");
+    let inferred = reason_with_report(
+        "\
+<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Person> .
+<http://x.com/a> <http://x.com/ssn> \"123\" .
+<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Person> .
+<http://x.com/b> <http://x.com/ssn> \"456\" .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Person))
+Declaration(DataProperty(:ssn))
+HasKey(:Person () (:ssn))
+)",
+        &report,
+        &[],
+    );
+    assert!(
+        !inferred.contains("sameAs"),
+        "different key values should not merge: {inferred}"
+    );
+}
+
+#[test]
+fn has_key_no_merge_wrong_class() {
+    // HasKey(C, [P]): instance not of class C should not participate.
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Person> .
+<http://x.com/a> <http://x.com/ssn> \"123\" .
+<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Robot> .
+<http://x.com/b> <http://x.com/ssn> \"123\" .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Person))
+Declaration(Class(:Robot))
+Declaration(DataProperty(:ssn))
+HasKey(:Person () (:ssn))
+)",
+    );
+    assert!(
+        !inferred.contains("sameAs"),
+        "HasKey should not merge instances of different classes: {inferred}"
+    );
+}
+
+#[test]
+fn has_key_missing_property_no_merge() {
+    // HasKey(C, [P]): instance missing key property should not participate.
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Person> .
+<http://x.com/a> <http://x.com/ssn> \"123\" .
+<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Person> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Person))
+Declaration(DataProperty(:ssn))
+HasKey(:Person () (:ssn))
+)",
+    );
+    assert!(
+        !inferred.contains("sameAs"),
+        "HasKey should not merge when key property is missing: {inferred}"
+    );
+}
+
+#[test]
+fn has_key_object_property() {
+    // HasKey with object property keys.
+    let inferred = reason(
+        "\
+<http://x.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Employee> .
+<http://x.com/a> <http://x.com/worksFor> <http://x.com/acme> .
+<http://x.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Employee> .
+<http://x.com/b> <http://x.com/worksFor> <http://x.com/acme> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Employee))
+Declaration(ObjectProperty(:worksFor))
+HasKey(:Employee (:worksFor) ())
+)",
+    );
+    assert!(
+        inferred.contains("sameAs"),
+        "HasKey with object property should merge: {inferred}"
+    );
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn write(path: &Path, content: &str) {

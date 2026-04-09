@@ -1,7 +1,7 @@
 pub mod inconsistency;
 pub mod sameas;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::compile::CompiledSchema;
 use crate::dict::TermId;
@@ -416,9 +416,10 @@ fn evaluate_equality_rules(
     let has_fp = !schema.functional_properties.is_empty();
     let has_ifp = !schema.inverse_functional_properties.is_empty();
     let has_mc1 = !schema.max_card_one.is_empty();
+    let has_key = !schema.has_key.is_empty();
 
     // Fast path: no schema equality axioms — only scan for asserted sameAs.
-    if !has_fp && !has_ifp && !has_mc1 {
+    if !has_fp && !has_ifp && !has_mc1 && !has_key {
         for result in store.known_properties_iter()? {
             let (s, p, o) = result?;
             if p == owl_same_as && union_find.union(s, o) {
@@ -428,9 +429,9 @@ fn evaluate_equality_rules(
         return Ok(new_equalities);
     }
 
-    // Build instance → classes map for max_card_one (need to know type membership).
+    // Build instance → classes map for max_card_one and has_key (need type membership).
     let mut instance_classes: BTreeMap<TermId, Vec<TermId>> = BTreeMap::new();
-    if has_mc1 {
+    if has_mc1 || has_key {
         for result in store.known_types_iter()? {
             let (inst, cls) = result?;
             let cinst = union_find.canonical(inst);
@@ -443,10 +444,11 @@ fn evaluate_equality_rules(
     }
 
     // Single scan of all known properties: group by (pred, canon_subj) for FP,
-    // by (pred, canon_obj) for IFP, and by (canon_subj, pred) for MC1.
+    // by (pred, canon_obj) for IFP, by (canon_subj, pred) for MC1/HasKey.
     let mut fp_groups: BTreeMap<(TermId, TermId), Vec<TermId>> = BTreeMap::new();
     let mut ifp_groups: BTreeMap<(TermId, TermId), Vec<TermId>> = BTreeMap::new();
     let mut mc1_groups: BTreeMap<(TermId, TermId), Vec<TermId>> = BTreeMap::new();
+    let mut key_values: BTreeMap<(TermId, TermId), Vec<TermId>> = BTreeMap::new();
 
     for result in store.known_properties_iter()? {
         let (s, p, o) = result?;
@@ -470,6 +472,9 @@ fn evaluate_equality_rules(
         }
         if has_mc1 && schema.max_card_one_by_prop.contains_key(&p) {
             mc1_groups.entry((cs, p)).or_default().push(co);
+        }
+        if has_key && schema.has_key_preds.contains(&p) {
+            key_values.entry((cs, p)).or_default().push(co);
         }
     }
 
@@ -513,6 +518,81 @@ fn evaluate_equality_rules(
                     objects.clone()
                 };
                 new_equalities += union_find.union_all(&qualifying);
+            }
+        }
+    }
+
+    // HasKey: for each HasKey(C, [P1,...,Pn]), group instances of C by their
+    // key-tuple (values for P1,...,Pn). Instances sharing a key-tuple are merged.
+    if has_key {
+        // Build class → instances reverse index for HasKey classes only.
+        let mut class_to_instances: BTreeMap<TermId, Vec<TermId>> = BTreeMap::new();
+        let key_classes: BTreeSet<TermId> =
+            schema.has_key.iter().map(|(cls, _)| *cls).collect();
+        for (&inst, classes) in &instance_classes {
+            for &c in classes {
+                if key_classes.contains(&c) {
+                    class_to_instances.entry(c).or_default().push(inst);
+                }
+            }
+        }
+
+        for (class, key_props) in &schema.has_key {
+            let instances = match class_to_instances.get(class) {
+                Some(insts) => insts,
+                None => continue,
+            };
+
+            // Group instances by key-tuple. Skip instances missing any key
+            // property. Multi-valued key properties produce cross-product tuples.
+            let mut tuple_to_instances: BTreeMap<Vec<TermId>, Vec<TermId>> = BTreeMap::new();
+            for &inst in instances {
+                let mut tuples: Vec<Vec<TermId>> = vec![vec![]];
+                let mut complete = true;
+                for &prop in key_props {
+                    let values = match key_values.get(&(inst, prop)) {
+                        Some(vs) => vs,
+                        None => {
+                            complete = false;
+                            break;
+                        }
+                    };
+                    let mut canon_vals: Vec<TermId> =
+                        values.iter().map(|&v| union_find.canonical(v)).collect();
+                    canon_vals.sort_unstable();
+                    canon_vals.dedup();
+
+                    // Cap cross-product to prevent combinatorial blowup from
+                    // pathological multi-valued key properties.
+                    let next_size = tuples.len() * canon_vals.len();
+                    if next_size > 10_000 {
+                        tracing::warn!(
+                            "HasKey tuple expansion for instance {} exceeds 10k — skipping",
+                            inst
+                        );
+                        complete = false;
+                        break;
+                    }
+
+                    let mut next_tuples = Vec::with_capacity(next_size);
+                    for partial in &tuples {
+                        for &val in &canon_vals {
+                            let mut extended = partial.clone();
+                            extended.push(val);
+                            next_tuples.push(extended);
+                        }
+                    }
+                    tuples = next_tuples;
+                }
+                if complete {
+                    for tuple in tuples {
+                        tuple_to_instances.entry(tuple).or_default().push(inst);
+                    }
+                }
+            }
+
+            for instances_group in tuple_to_instances.values() {
+                new_equalities += union_find.union_all(instances_group);
             }
         }
     }

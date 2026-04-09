@@ -73,6 +73,10 @@ pub struct RawSchema {
     pub same_individuals: Vec<Vec<TermId>>,
     pub different_individuals: Vec<Vec<TermId>>,
 
+    // Equality-producing axioms
+    /// (class, [key_properties]) — HasKey(C, [P1,...,Pn])
+    pub has_key: Vec<(TermId, Vec<TermId>)>,
+
     // Negative assertions
     /// (property, subject, object) — NegativeObjectPropertyAssertion
     pub negative_object_property_assertions: Vec<(TermId, TermId, TermId)>,
@@ -107,6 +111,7 @@ impl RawSchema {
             + self.disjoint_properties.len()
             + self.irreflexive_properties.len()
             + self.asymmetric_properties.len()
+            + self.has_key.len()
             + self.same_individuals.len()
             + self.different_individuals.len()
             + self.negative_object_property_assertions.len()

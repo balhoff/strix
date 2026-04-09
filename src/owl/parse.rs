@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use horned_owl::io::{ParserConfiguration, ofn, owx, rdf};
 use horned_owl::model::{
-    ClassExpression, Component, Individual, Literal, ObjectPropertyExpression, RcStr,
-    SubObjectPropertyExpression,
+    ClassExpression, Component, Individual, Literal, ObjectPropertyExpression, PropertyExpression,
+    RcStr, SubObjectPropertyExpression,
 };
 use horned_owl::ontology::set::SetOntology;
 use oxrdfio::RdfFormat as OxRdfFormat;
@@ -715,10 +715,25 @@ fn absorb_ontology(
                     "ReflexiveObjectProperty not yet implemented".to_string(),
                 );
             }
-            Component::HasKey { .. } => {
-                schema
-                    .unsupported
-                    .insert("owl:HasKey not yet implemented".to_string());
+            Component::HasKey(axiom) => {
+                if let Ok(class) = encode_named_class(&axiom.ce, dictionary) {
+                    let props: Vec<TermId> = axiom
+                        .vpe
+                        .iter()
+                        .filter_map(|pe| match pe {
+                            PropertyExpression::ObjectPropertyExpression(ope) => {
+                                encode_named_object_property(ope, dictionary).ok()
+                            }
+                            PropertyExpression::DataProperty(dp) => {
+                                Some(dictionary.encode_iri(dp.as_ref()))
+                            }
+                            PropertyExpression::AnnotationProperty(_) => None,
+                        })
+                        .collect();
+                    if !props.is_empty() {
+                        schema.has_key.push((class, props));
+                    }
+                }
             }
             Component::Rule(_) => {
                 schema
