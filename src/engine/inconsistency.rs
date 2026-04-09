@@ -59,6 +59,7 @@ pub fn check_inconsistencies(
     store: &mut FactStore,
     schema: &CompiledSchema,
     union_find: Option<&mut UnionFind>,
+    different_pairs: &[(TermId, TermId)],
 ) -> Result<Vec<Inconsistency>> {
     let mut results = Vec::new();
 
@@ -69,7 +70,7 @@ pub fn check_inconsistencies(
     check_asymmetric_properties(store, schema, &mut results)?;
     check_negative_property_assertions(store, schema, &mut results)?;
     if let Some(uf) = union_find {
-        check_different_individuals(schema, uf, &mut results);
+        check_different_individuals(different_pairs, uf, &mut results);
     }
 
     Ok(results)
@@ -366,11 +367,11 @@ fn check_negative_property_assertions(
 /// If two individuals declared different ended up in the same equivalence
 /// class (via owl:sameAs or equality-producing rules), that's an inconsistency.
 fn check_different_individuals(
-    schema: &CompiledSchema,
+    different_pairs: &[(TermId, TermId)],
     union_find: &mut UnionFind,
     results: &mut Vec<Inconsistency>,
 ) {
-    for &(a, b) in &schema.different_individual_pairs {
+    for &(a, b) in different_pairs {
         if union_find.canonical(a) == union_find.canonical(b) {
             results.push(Inconsistency::DifferentIndividuals {
                 individual_a: a,

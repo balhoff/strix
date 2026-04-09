@@ -37,6 +37,20 @@ impl UnionFind {
         root
     }
 
+    /// Find the canonical representative of `x` without path compression.
+    ///
+    /// Suitable for read-only contexts (e.g. SWRL body resolution during
+    /// the inner fixpoint where the union-find is borrowed immutably).
+    pub fn find_immutable(&self, x: TermId) -> TermId {
+        let mut current = x;
+        loop {
+            match self.parent.get(&current) {
+                Some(&p) if p != current => current = p,
+                _ => return current,
+            }
+        }
+    }
+
     /// Merge the equivalence classes of `x` and `y`.
     /// Returns `true` if a new merge occurred (they were in different classes).
     pub fn union(&mut self, x: TermId, y: TermId) -> bool {

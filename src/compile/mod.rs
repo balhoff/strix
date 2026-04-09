@@ -3,7 +3,9 @@ pub mod ir;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::dict::TermId;
-use crate::owl::RawSchema;
+use crate::owl::{RawSchema, RawSwrlArg, RawSwrlAtom};
+
+use ir::{CompiledSwrlRule, SwrlArg, SwrlBodyAtom, SwrlHeadAtom};
 
 #[derive(Clone, Debug)]
 pub struct CompiledSchema {
@@ -80,6 +82,13 @@ pub struct CompiledSchema {
     // Negative assertions (Phase 3)
     /// (property, subject, object) — combined from NegativeOPA + NegativeDPA
     pub negative_property_assertions: Vec<(TermId, TermId, TermId)>,
+
+    // SWRL rules (Phase 3)
+    pub swrl_rules: Vec<CompiledSwrlRule>,
+    /// class → [rule indices] — rules triggered by a ClassAtom matching this class
+    pub swrl_by_type_trigger: BTreeMap<TermId, Vec<usize>>,
+    /// predicate → [rule indices] — rules triggered by a PropertyAtom matching this predicate
+    pub swrl_by_prop_trigger: BTreeMap<TermId, Vec<usize>>,
 
     /// Predicates that require in-memory indexing for join evaluation.
     pub indexed_predicates: BTreeSet<TermId>,
@@ -278,6 +287,9 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
         .map(|&(cls, prop, filler)| (cls, prop, filler.filter(|&f| f != owl_thing)))
         .collect();
 
+    // Compile SWRL rules
+    let swrl = compile_swrl_rules(schema);
+
     // Predicates needing in-memory indexing for join-based rules.
     // Built from filtered lookup tables so owl:Thing-only entries are excluded.
     let mut indexed_predicates = transitive_properties.clone();
@@ -289,13 +301,28 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
     for (_, key_props) in &schema.has_key {
         indexed_predicates.extend(key_props);
     }
-
     // Classes needing in-memory indexing for join-based rules.
     let mut indexed_classes: BTreeSet<TermId> = BTreeSet::new();
     indexed_classes.extend(some_values_from_by_filler.keys());
     indexed_classes.extend(schema.has_key.iter().map(|(cls, _)| cls));
     indexed_classes.extend(all_values_from_by_class.keys());
     indexed_classes.extend(intersection_conjuncts.values().flatten());
+
+    // Register SWRL-referenced predicates and classes for indexing
+    for rule in &swrl.rules {
+        for atom in &rule.body {
+            match atom {
+                SwrlBodyAtom::PropertyAtom { property, .. } => {
+                    indexed_predicates.insert(*property);
+                }
+                SwrlBodyAtom::ClassAtom { class, .. } => {
+                    indexed_classes.insert(*class);
+                }
+                SwrlBodyAtom::SameIndividualAtom { .. }
+                | SwrlBodyAtom::DifferentIndividualsAtom { .. } => {}
+            }
+        }
+    }
 
     CompiledSchema {
         superclasses: to_map(&subclass_closure),
@@ -337,11 +364,177 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
             .chain(schema.negative_data_property_assertions.iter())
             .copied()
             .collect(),
+        swrl_rules: swrl.rules,
+        swrl_by_type_trigger: swrl.by_type_trigger,
+        swrl_by_prop_trigger: swrl.by_prop_trigger,
         indexed_predicates,
         indexed_classes,
         schema_iterations: subclass_iterations.max(subproperty_iterations),
         schema_inferred: subclass_inferred + subproperty_inferred,
         rule_set: ir::RuleSet::build(),
+    }
+}
+
+struct CompiledSwrlRules {
+    rules: Vec<CompiledSwrlRule>,
+    by_type_trigger: BTreeMap<TermId, Vec<usize>>,
+    by_prop_trigger: BTreeMap<TermId, Vec<usize>>,
+}
+
+/// Compile raw SWRL rules into evaluated form, returning rules and trigger indexes.
+fn compile_swrl_rules(schema: &RawSchema) -> CompiledSwrlRules {
+    let mut rules = Vec::new();
+    let mut by_type: BTreeMap<TermId, Vec<usize>> = BTreeMap::new();
+    let mut by_prop: BTreeMap<TermId, Vec<usize>> = BTreeMap::new();
+
+    for raw in &schema.swrl_rules {
+        let mut var_map: BTreeMap<TermId, u32> = BTreeMap::new();
+        let mut next_var: u32 = 0;
+        let mut convert_arg = |arg: &RawSwrlArg| -> SwrlArg {
+            match arg {
+                RawSwrlArg::Variable(id) => {
+                    let v = *var_map.entry(*id).or_insert_with(|| {
+                        let v = next_var;
+                        next_var += 1;
+                        v
+                    });
+                    SwrlArg::Variable(v)
+                }
+                RawSwrlArg::Constant(id) => SwrlArg::Constant(*id),
+            }
+        };
+
+        let body: Vec<SwrlBodyAtom> = raw
+            .body
+            .iter()
+            .map(|atom| match atom {
+                RawSwrlAtom::ClassAtom { class, arg } => SwrlBodyAtom::ClassAtom {
+                    class: *class,
+                    arg: convert_arg(arg),
+                },
+                RawSwrlAtom::PropertyAtom { property, subject, object } => {
+                    SwrlBodyAtom::PropertyAtom {
+                        property: *property,
+                        subject: convert_arg(subject),
+                        object: convert_arg(object),
+                    }
+                }
+                RawSwrlAtom::SameIndividualAtom { left, right } => {
+                    SwrlBodyAtom::SameIndividualAtom {
+                        left: convert_arg(left),
+                        right: convert_arg(right),
+                    }
+                }
+                RawSwrlAtom::DifferentIndividualsAtom { left, right } => {
+                    SwrlBodyAtom::DifferentIndividualsAtom {
+                        left: convert_arg(left),
+                        right: convert_arg(right),
+                    }
+                }
+            })
+            .collect();
+
+        let heads: Vec<SwrlHeadAtom> = raw
+            .head
+            .iter()
+            .map(|atom| match atom {
+                RawSwrlAtom::ClassAtom { class, arg } => SwrlHeadAtom::ClassAtom {
+                    class: *class,
+                    arg: convert_arg(arg),
+                },
+                RawSwrlAtom::PropertyAtom { property, subject, object } => {
+                    SwrlHeadAtom::PropertyAtom {
+                        property: *property,
+                        subject: convert_arg(subject),
+                        object: convert_arg(object),
+                    }
+                }
+                RawSwrlAtom::SameIndividualAtom { left, right } => {
+                    SwrlHeadAtom::SameIndividualAtom {
+                        left: convert_arg(left),
+                        right: convert_arg(right),
+                    }
+                }
+                RawSwrlAtom::DifferentIndividualsAtom { left, right } => {
+                    SwrlHeadAtom::DifferentIndividualsAtom {
+                        left: convert_arg(left),
+                        right: convert_arg(right),
+                    }
+                }
+            })
+            .collect();
+
+        let num_vars = next_var;
+        let trigger = select_trigger(&body);
+        let remaining: Vec<usize> = (0..body.len()).filter(|&i| i != trigger).collect();
+
+        // Multi-head rules expand into one compiled rule per head atom.
+        for head in heads {
+            let idx = rules.len();
+            match &body[trigger] {
+                SwrlBodyAtom::ClassAtom { class, .. } => {
+                    by_type.entry(*class).or_default().push(idx);
+                }
+                SwrlBodyAtom::PropertyAtom { property, .. } => {
+                    by_prop.entry(*property).or_default().push(idx);
+                }
+                SwrlBodyAtom::SameIndividualAtom { .. }
+                | SwrlBodyAtom::DifferentIndividualsAtom { .. } => {}
+            }
+            rules.push(CompiledSwrlRule {
+                trigger,
+                remaining: remaining.clone(),
+                body: body.clone(),
+                head,
+                num_vars,
+            });
+        }
+    }
+
+    CompiledSwrlRules {
+        rules,
+        by_type_trigger: by_type,
+        by_prop_trigger: by_prop,
+    }
+}
+
+/// Select the best trigger atom for a SWRL rule body.
+///
+/// Heuristic: pick the atom that will be most selective when scanned from
+/// deltas. Property atoms bind 2 variables per match (subject + object)
+/// vs 1 for class atoms, so we prefer them when tied on "new variables bound".
+fn select_trigger(body: &[SwrlBodyAtom]) -> usize {
+    let mut bound: u64 = 0;
+    let mut best = 0;
+    let mut best_score: (usize, bool) = (0, false);
+
+    for (i, atom) in body.iter().enumerate() {
+        let var_mask = atom_var_mask(atom);
+        let new = (var_mask & !bound).count_ones() as usize;
+        let is_prop = matches!(atom, SwrlBodyAtom::PropertyAtom { .. });
+        let score = (new, is_prop);
+        if score > best_score {
+            best_score = score;
+            best = i;
+        }
+        bound |= var_mask;
+    }
+    best
+}
+
+/// Returns a bitmask of variable IDs referenced by the atom.
+fn atom_var_mask(atom: &SwrlBodyAtom) -> u64 {
+    match atom {
+        SwrlBodyAtom::ClassAtom { arg, .. } => arg.as_variable().map_or(0, |v| 1 << v),
+        SwrlBodyAtom::PropertyAtom { subject, object, .. } => {
+            subject.as_variable().map_or(0, |v| 1 << v)
+                | object.as_variable().map_or(0, |v| 1 << v)
+        }
+        SwrlBodyAtom::SameIndividualAtom { left, right }
+        | SwrlBodyAtom::DifferentIndividualsAtom { left, right } => {
+            left.as_variable().map_or(0, |v| 1 << v)
+                | right.as_variable().map_or(0, |v| 1 << v)
+        }
     }
 }
 

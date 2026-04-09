@@ -77,6 +77,9 @@ pub struct RawSchema {
     /// (class, [key_properties]) — HasKey(C, [P1,...,Pn])
     pub has_key: Vec<(TermId, Vec<TermId>)>,
 
+    // SWRL rules
+    pub swrl_rules: Vec<RawSwrlRule>,
+
     // Negative assertions
     /// (property, subject, object) — NegativeObjectPropertyAssertion
     pub negative_object_property_assertions: Vec<(TermId, TermId, TermId)>,
@@ -112,6 +115,7 @@ impl RawSchema {
             + self.irreflexive_properties.len()
             + self.asymmetric_properties.len()
             + self.has_key.len()
+            + self.swrl_rules.len()
             + self.same_individuals.len()
             + self.different_individuals.len()
             + self.negative_object_property_assertions.len()
@@ -121,6 +125,26 @@ impl RawSchema {
     pub fn unsupported_constructs(&self) -> Vec<String> {
         self.unsupported.iter().cloned().collect()
     }
+}
+
+#[derive(Debug)]
+pub struct RawSwrlRule {
+    pub body: Vec<RawSwrlAtom>,
+    pub head: Vec<RawSwrlAtom>,
+}
+
+#[derive(Debug)]
+pub enum RawSwrlAtom {
+    ClassAtom { class: TermId, arg: RawSwrlArg },
+    PropertyAtom { property: TermId, subject: RawSwrlArg, object: RawSwrlArg },
+    SameIndividualAtom { left: RawSwrlArg, right: RawSwrlArg },
+    DifferentIndividualsAtom { left: RawSwrlArg, right: RawSwrlArg },
+}
+
+#[derive(Debug)]
+pub enum RawSwrlArg {
+    Variable(TermId),
+    Constant(TermId),
 }
 
 #[derive(Debug, Default)]

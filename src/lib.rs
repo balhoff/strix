@@ -154,6 +154,7 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
     let MaterializeResult {
         stats: reasoning_stats,
         mut union_find,
+        swrl_different_pairs,
     } = materialize(
         &mut store,
         &compiled_schema,
@@ -163,10 +164,14 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
     )?;
     let reasoning_time_ms = reasoning_timer.elapsed_ms();
 
+    let mut all_different_pairs = compiled_schema.different_individual_pairs.clone();
+    all_different_pairs.extend_from_slice(&swrl_different_pairs);
+
     let inconsistencies = inconsistency::check_inconsistencies(
         &mut store,
         &compiled_schema,
         Some(&mut union_find),
+        &all_different_pairs,
     )?;
     let inconsistency_reports: Vec<InconsistencyReport> = inconsistencies
         .iter()

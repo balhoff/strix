@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use horned_owl::io::{ParserConfiguration, ofn, owx, rdf};
 use horned_owl::model::{
-    ClassExpression, Component, Individual, Literal, ObjectPropertyExpression, PropertyExpression,
-    RcStr, SubObjectPropertyExpression,
+    Atom, ClassExpression, Component, IArgument, Individual, Literal, ObjectPropertyExpression,
+    PropertyExpression, RcStr, SubObjectPropertyExpression,
 };
 use horned_owl::ontology::set::SetOntology;
 use oxrdfio::RdfFormat as OxRdfFormat;
@@ -18,7 +18,7 @@ use anyhow::Context;
 use crate::error::Result;
 use crate::rdf::{Literal as RdfLiteral, Term as RdfTerm, Triple};
 
-use super::{ExtractedSchema, RawSchema};
+use super::{ExtractedSchema, RawSchema, RawSwrlArg, RawSwrlAtom, RawSwrlRule};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Compression {
@@ -735,10 +735,11 @@ fn absorb_ontology(
                     }
                 }
             }
-            Component::Rule(_) => {
-                schema
-                    .unsupported
-                    .insert("SWRL rules deferred to Phase 3".to_string());
+            Component::Rule(axiom) => {
+                match parse_swrl_rule(&axiom.head, &axiom.body, dictionary, schema) {
+                    Ok(rule) => schema.swrl_rules.push(rule),
+                    Err(reason) => { schema.unsupported.insert(reason); }
+                }
             }
         }
     }
@@ -1035,6 +1036,104 @@ fn encode_horned_literal(lit: &Literal<RcStr>) -> RdfTerm {
             language: None,
             datatype: Some(datatype_iri.to_string()),
         }),
+    }
+}
+
+fn parse_swrl_rule(
+    head: &[Atom<RcStr>],
+    body: &[Atom<RcStr>],
+    dictionary: &mut Dictionary,
+    schema: &mut RawSchema,
+) -> std::result::Result<RawSwrlRule, String> {
+    let mut raw_body = Vec::new();
+    for atom in body {
+        match convert_swrl_atom(atom, dictionary) {
+            Ok(a) => raw_body.push(a),
+            Err(reason) => {
+                schema.unsupported.insert(reason);
+                return Err("SWRL rule with unsupported body atom".to_string());
+            }
+        }
+    }
+
+    let mut raw_head = Vec::new();
+    for atom in head {
+        match convert_swrl_atom(atom, dictionary) {
+            Ok(a) => raw_head.push(a),
+            Err(reason) => {
+                schema.unsupported.insert(reason);
+                return Err("SWRL rule with unsupported head atom".to_string());
+            }
+        }
+    }
+
+    if raw_body.is_empty() {
+        return Err("SWRL rule with empty body".to_string());
+    }
+    if raw_head.is_empty() {
+        return Err("SWRL rule with empty head".to_string());
+    }
+
+    Ok(RawSwrlRule {
+        body: raw_body,
+        head: raw_head,
+    })
+}
+
+fn convert_swrl_atom(
+    atom: &Atom<RcStr>,
+    dictionary: &mut Dictionary,
+) -> std::result::Result<RawSwrlAtom, String> {
+    match atom {
+        Atom::ClassAtom { pred, arg } => {
+            let class = encode_named_class(pred, dictionary)
+                .map_err(|()| "SWRL ClassAtom with anonymous class expression".to_string())?;
+            let arg = convert_iargument(arg, dictionary)?;
+            Ok(RawSwrlAtom::ClassAtom { class, arg })
+        }
+        Atom::ObjectPropertyAtom { pred, args } => {
+            let property = encode_named_object_property(pred, dictionary)
+                .map_err(|()| "SWRL ObjectPropertyAtom with inverse property expression".to_string())?;
+            let subject = convert_iargument(&args.0, dictionary)?;
+            let object = convert_iargument(&args.1, dictionary)?;
+            Ok(RawSwrlAtom::PropertyAtom { property, subject, object })
+        }
+        Atom::SameIndividualAtom(left, right) => {
+            let left = convert_iargument(left, dictionary)?;
+            let right = convert_iargument(right, dictionary)?;
+            Ok(RawSwrlAtom::SameIndividualAtom { left, right })
+        }
+        Atom::DifferentIndividualsAtom(left, right) => {
+            let left = convert_iargument(left, dictionary)?;
+            let right = convert_iargument(right, dictionary)?;
+            Ok(RawSwrlAtom::DifferentIndividualsAtom { left, right })
+        }
+        Atom::DataPropertyAtom { .. } => {
+            Err("SWRL DataPropertyAtom not supported".to_string())
+        }
+        Atom::DataRangeAtom { .. } => {
+            Err("SWRL DataRangeAtom not supported".to_string())
+        }
+        Atom::BuiltInAtom { .. } => {
+            Err("SWRL BuiltInAtom not supported".to_string())
+        }
+    }
+}
+
+fn convert_iargument(
+    arg: &IArgument<RcStr>,
+    dictionary: &mut Dictionary,
+) -> std::result::Result<RawSwrlArg, String> {
+    match arg {
+        IArgument::Variable(v) => {
+            let id = dictionary.encode_iri(v.0.as_ref());
+            Ok(RawSwrlArg::Variable(id))
+        }
+        IArgument::Individual(ind) => {
+            let id = encode_individual(ind, dictionary)
+                .map_err(|()| "SWRL atom with anonymous individual".to_string())?;
+            Ok(RawSwrlArg::Constant(id))
+        }
     }
 }
 

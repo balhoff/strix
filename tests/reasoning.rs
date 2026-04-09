@@ -3073,6 +3073,423 @@ HasKey(:Employee (:worksFor) ())
     );
 }
 
+// ─── SWRL parsing ──────────────────────────────────────────────────────────
+
+#[test]
+fn swrl_class_atom_rule_parses() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report_path = temp_dir.path().join("report.json");
+
+    let _inferred = reason_with_report(
+        "<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/A> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Ontology(\n\
+           DLSafeRule(\n\
+             Body(ClassAtom(:A Variable(<urn:swrl:var#x>)))\n\
+             Head(ClassAtom(:B Variable(<urn:swrl:var#x>)))\n\
+           )\n\
+         )",
+        &report_path,
+        &[],
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+    let unsupported = report["rules"]["unsupported_encountered"]
+        .as_array()
+        .unwrap();
+    assert!(
+        !unsupported.iter().any(|v| v.as_str().unwrap().contains("SWRL")),
+        "SWRL class atom rule should parse without unsupported warnings: {unsupported:?}"
+    );
+}
+
+#[test]
+fn swrl_property_atom_rule_parses() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report_path = temp_dir.path().join("report.json");
+
+    let _inferred = reason_with_report(
+        "<http://example.com/alice> <http://example.com/P> <http://example.com/bob> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Ontology(\n\
+           DLSafeRule(\n\
+             Body(ObjectPropertyAtom(:P Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>)))\n\
+             Head(ObjectPropertyAtom(:Q Variable(<urn:swrl:var#y>) Variable(<urn:swrl:var#x>)))\n\
+           )\n\
+         )",
+        &report_path,
+        &[],
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+    let unsupported = report["rules"]["unsupported_encountered"]
+        .as_array()
+        .unwrap();
+    assert!(
+        !unsupported.iter().any(|v| v.as_str().unwrap().contains("SWRL")),
+        "SWRL property atom rule should parse without unsupported warnings: {unsupported:?}"
+    );
+}
+
+#[test]
+fn swrl_multi_atom_rule_parses() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report_path = temp_dir.path().join("report.json");
+
+    let _inferred = reason_with_report(
+        "<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/A> .\n\
+         <http://example.com/alice> <http://example.com/P> <http://example.com/bob> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Ontology(\n\
+           DLSafeRule(\n\
+             Body(\n\
+               ClassAtom(:A Variable(<urn:swrl:var#x>))\n\
+               ObjectPropertyAtom(:P Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>))\n\
+             )\n\
+             Head(ClassAtom(:B Variable(<urn:swrl:var#y>)))\n\
+           )\n\
+         )",
+        &report_path,
+        &[],
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+    let unsupported = report["rules"]["unsupported_encountered"]
+        .as_array()
+        .unwrap();
+    assert!(
+        !unsupported.iter().any(|v| v.as_str().unwrap().contains("SWRL")),
+        "SWRL multi-atom rule should parse without unsupported warnings: {unsupported:?}"
+    );
+}
+
+#[test]
+fn swrl_data_property_atom_flagged_unsupported() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report_path = temp_dir.path().join("report.json");
+
+    let _inferred = reason_with_report(
+        "<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/A> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)\n\
+         Ontology(\n\
+           DLSafeRule(\n\
+             Body(DataPropertyAtom(:dp Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#v>)))\n\
+             Head(ClassAtom(:B Variable(<urn:swrl:var#x>)))\n\
+           )\n\
+         )",
+        &report_path,
+        &[],
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+    let unsupported = report["rules"]["unsupported_encountered"]
+        .as_array()
+        .unwrap();
+    assert!(
+        unsupported.iter().any(|v| v.as_str().unwrap().contains("DataPropertyAtom")),
+        "SWRL DataPropertyAtom should be flagged unsupported: {unsupported:?}"
+    );
+}
+
+#[test]
+fn swrl_same_individual_atom_parses() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report_path = temp_dir.path().join("report.json");
+
+    let _inferred = reason_with_report(
+        "<http://example.com/alice> <http://example.com/P> <http://example.com/bob> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Ontology(\n\
+           DLSafeRule(\n\
+             Body(ObjectPropertyAtom(:P Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>)))\n\
+             Head(SameIndividualAtom(Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>)))\n\
+           )\n\
+         )",
+        &report_path,
+        &[],
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+    let unsupported = report["rules"]["unsupported_encountered"]
+        .as_array()
+        .unwrap();
+    assert!(
+        !unsupported.iter().any(|v| v.as_str().unwrap().contains("SWRL")),
+        "SWRL SameIndividualAtom rule should parse: {unsupported:?}"
+    );
+}
+
+#[test]
+fn swrl_different_individuals_atom_in_body_parses() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report_path = temp_dir.path().join("report.json");
+
+    let _inferred = reason_with_report(
+        "<http://example.com/alice> <http://example.com/P> <http://example.com/bob> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Ontology(\n\
+           DLSafeRule(\n\
+             Body(\n\
+               ObjectPropertyAtom(:P Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>))\n\
+               DifferentIndividualsAtom(Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>))\n\
+             )\n\
+             Head(ClassAtom(:Distinct Variable(<urn:swrl:var#x>)))\n\
+           )\n\
+         )",
+        &report_path,
+        &[],
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+    let unsupported = report["rules"]["unsupported_encountered"]
+        .as_array()
+        .unwrap();
+    assert!(
+        !unsupported.iter().any(|v| v.as_str().unwrap().contains("SWRL")),
+        "SWRL DifferentIndividualsAtom in body should parse: {unsupported:?}"
+    );
+}
+
+#[test]
+fn swrl_different_individuals_atom_in_head_parses() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report_path = temp_dir.path().join("report.json");
+
+    let _inferred = reason_with_report(
+        "<http://example.com/alice> <http://example.com/P> <http://example.com/bob> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Ontology(\n\
+           DLSafeRule(\n\
+             Body(ObjectPropertyAtom(:P Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>)))\n\
+             Head(DifferentIndividualsAtom(Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>)))\n\
+           )\n\
+         )",
+        &report_path,
+        &[],
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+    let unsupported = report["rules"]["unsupported_encountered"]
+        .as_array()
+        .unwrap();
+    assert!(
+        !unsupported.iter().any(|v| v.as_str().unwrap().contains("SWRL")),
+        "SWRL DifferentIndividualsAtom in head should parse: {unsupported:?}"
+    );
+}
+
+// ─── SWRL inference tests ───────────────────────────────────────────────────
+
+#[test]
+fn swrl_class_to_class_inference() {
+    // C(?x) → D(?x)  (similar to SubClassOf but via SWRL)
+    let inferred = reason(
+        "<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/C> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Ontology(\n\
+           Declaration(Class(:C))\n\
+           Declaration(Class(:D))\n\
+           DLSafeRule(\n\
+             Body(ClassAtom(:C Variable(<urn:swrl:var#x>)))\n\
+             Head(ClassAtom(:D Variable(<urn:swrl:var#x>)))\n\
+           )\n\
+         )",
+    );
+    assert!(
+        inferred.contains("<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/D> ."),
+        "SWRL C(?x) → D(?x) should infer alice:D: {inferred}"
+    );
+}
+
+#[test]
+fn swrl_property_to_inverse_property_inference() {
+    // P(?x,?y) → Q(?y,?x)  (similar to InverseOf but via SWRL)
+    let inferred = reason(
+        "<http://example.com/alice> <http://example.com/P> <http://example.com/bob> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Ontology(\n\
+           Declaration(ObjectProperty(:P))\n\
+           Declaration(ObjectProperty(:Q))\n\
+           DLSafeRule(\n\
+             Body(ObjectPropertyAtom(:P Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>)))\n\
+             Head(ObjectPropertyAtom(:Q Variable(<urn:swrl:var#y>) Variable(<urn:swrl:var#x>)))\n\
+           )\n\
+         )",
+    );
+    assert!(
+        inferred.contains("<http://example.com/bob> <http://example.com/Q> <http://example.com/alice> ."),
+        "SWRL P(?x,?y) → Q(?y,?x) should infer bob Q alice: {inferred}"
+    );
+}
+
+#[test]
+fn swrl_multi_atom_join_inference() {
+    // C(?x) ∧ P(?x,?y) → D(?y)
+    let inferred = reason(
+        "<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/C> .\n\
+         <http://example.com/alice> <http://example.com/P> <http://example.com/bob> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Ontology(\n\
+           Declaration(Class(:C))\n\
+           Declaration(Class(:D))\n\
+           Declaration(ObjectProperty(:P))\n\
+           DLSafeRule(\n\
+             Body(\n\
+               ClassAtom(:C Variable(<urn:swrl:var#x>))\n\
+               ObjectPropertyAtom(:P Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>))\n\
+             )\n\
+             Head(ClassAtom(:D Variable(<urn:swrl:var#y>)))\n\
+           )\n\
+         )",
+    );
+    assert!(
+        inferred.contains("<http://example.com/bob> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/D> ."),
+        "SWRL C(?x) ∧ P(?x,?y) → D(?y) should infer bob:D: {inferred}"
+    );
+}
+
+#[test]
+fn swrl_multi_atom_join_missing_class() {
+    // C(?x) ∧ P(?x,?y) → D(?y) — alice is NOT C, so no inference
+    let inferred = reason(
+        "<http://example.com/alice> <http://example.com/P> <http://example.com/bob> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Ontology(\n\
+           Declaration(Class(:C))\n\
+           Declaration(Class(:D))\n\
+           Declaration(ObjectProperty(:P))\n\
+           DLSafeRule(\n\
+             Body(\n\
+               ClassAtom(:C Variable(<urn:swrl:var#x>))\n\
+               ObjectPropertyAtom(:P Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>))\n\
+             )\n\
+             Head(ClassAtom(:D Variable(<urn:swrl:var#y>)))\n\
+           )\n\
+         )",
+    );
+    assert!(
+        !inferred.contains("<http://example.com/bob> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/D> ."),
+        "SWRL should not fire when class condition not met: {inferred}"
+    );
+}
+
+#[test]
+fn swrl_same_individual_head_produces_equality() {
+    // P(?x,?y) → SameIndividual(?x,?y)
+    let inferred = reason(
+        "<http://example.com/alice> <http://example.com/P> <http://example.com/bob> .\n\
+         <http://example.com/bob> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/C> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Ontology(\n\
+           Declaration(ObjectProperty(:P))\n\
+           DLSafeRule(\n\
+             Body(ObjectPropertyAtom(:P Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>)))\n\
+             Head(SameIndividualAtom(Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>)))\n\
+           )\n\
+         )",
+    );
+    // SWRL SameIndividual head should produce owl:sameAs and unify facts
+    assert!(
+        inferred.contains("<http://example.com/alice> <http://www.w3.org/2002/07/owl#sameAs> <http://example.com/bob> .")
+        || inferred.contains("<http://example.com/bob> <http://www.w3.org/2002/07/owl#sameAs> <http://example.com/alice> ."),
+        "SWRL SameIndividual head should produce sameAs: {inferred}"
+    );
+    // Equality reasoning should propagate bob's type to alice
+    assert!(
+        inferred.contains("<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/C> ."),
+        "SWRL SameIndividual should unify types: {inferred}"
+    );
+}
+
+#[test]
+fn swrl_different_individuals_head_inconsistency() {
+    // P(?x,?y) → DifferentIndividuals(?x,?y)
+    // Combined with SameIndividual(alice, bob) → inconsistency
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let report_path = temp_dir.path().join("report.json");
+
+    let _inferred = reason_with_report(
+        "<http://example.com/alice> <http://example.com/P> <http://example.com/bob> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Prefix(owl:=<http://www.w3.org/2002/07/owl#>)\n\
+         Ontology(\n\
+           Declaration(ObjectProperty(:P))\n\
+           SameIndividual(:alice :bob)\n\
+           DLSafeRule(\n\
+             Body(ObjectPropertyAtom(:P Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>)))\n\
+             Head(DifferentIndividualsAtom(Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>)))\n\
+           )\n\
+         )",
+        &report_path,
+        &["--inconsistency-mode", "report"],
+    );
+
+    let report_json = fs::read_to_string(&report_path).unwrap();
+    assert!(
+        report_json.contains("DifferentIndividuals"),
+        "SWRL DifferentIndividuals head should produce inconsistency when merged: {report_json}"
+    );
+}
+
+#[test]
+fn swrl_chained_inference() {
+    // C(?x) → D(?x), D(?x) → E(?x) — two SWRL rules chaining
+    let inferred = reason(
+        "<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/C> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Ontology(\n\
+           Declaration(Class(:C))\n\
+           Declaration(Class(:D))\n\
+           Declaration(Class(:E))\n\
+           DLSafeRule(\n\
+             Body(ClassAtom(:C Variable(<urn:swrl:var#x>)))\n\
+             Head(ClassAtom(:D Variable(<urn:swrl:var#x>)))\n\
+           )\n\
+           DLSafeRule(\n\
+             Body(ClassAtom(:D Variable(<urn:swrl:var#x>)))\n\
+             Head(ClassAtom(:E Variable(<urn:swrl:var#x>)))\n\
+           )\n\
+         )",
+    );
+    assert!(
+        inferred.contains("<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/D> ."),
+        "first SWRL rule should fire: {inferred}"
+    );
+    assert!(
+        inferred.contains("<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/E> ."),
+        "chained SWRL rule should fire: {inferred}"
+    );
+}
+
+#[test]
+fn swrl_constant_in_head() {
+    // P(?x,?y) → ClassAtom(D, ?x) — class constant in head
+    let inferred = reason(
+        "<http://example.com/alice> <http://example.com/P> <http://example.com/bob> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Ontology(\n\
+           Declaration(ObjectProperty(:P))\n\
+           Declaration(Class(:D))\n\
+           DLSafeRule(\n\
+             Body(ObjectPropertyAtom(:P Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>)))\n\
+             Head(ClassAtom(:D Variable(<urn:swrl:var#x>)))\n\
+           )\n\
+         )",
+    );
+    assert!(
+        inferred.contains("<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/D> ."),
+        "SWRL with property trigger and class head should fire: {inferred}"
+    );
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn write(path: &Path, content: &str) {
