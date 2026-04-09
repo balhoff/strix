@@ -56,6 +56,12 @@ On the 2nd+ call to `inner_fixpoint` (after equality expansion), the seed pass r
 
 **Impact**: Proportional to total known facts. Only matters for very large stores where the scan itself is the bottleneck, not the intersection checks.
 
+## Store: Bloom filter for fast duplicate rejection during difference
+
+Add a tunable Bloom filter sized from the memory budget, inserted before the streaming difference check in `difference_streaming_into`. If the Bloom filter says "not present", skip the disk lookup entirely. Only facts that pass the Bloom filter need the full sorted-segment membership test.
+
+**Impact**: Reduces disk I/O during the difference step, which is the bottleneck for large delta sets. Most significant in early iterations when delta volume is high and the known store is large.
+
 ## Store: unify BinaryRelation and TernaryRelation via generic Relation\<T\>
 
 ~100 lines of near-identical code between `BinaryRelation` and `TernaryRelation`. Could be unified into `Relation<T>` parameterized over tuple type, with a trait for serialization.
