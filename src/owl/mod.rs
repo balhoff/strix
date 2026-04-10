@@ -2,6 +2,8 @@ mod parse;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use horned_owl::model::{ClassExpression, RcStr};
+
 use crate::dict::{Dictionary, TermId};
 use crate::error::Result;
 use crate::rdf::{Term, Triple};
@@ -83,7 +85,11 @@ pub struct RawSchema {
     // Proxy naming infrastructure (anonymous CE / ObjectInverseOf support)
     pub proxy_counter: u32,
     pub inverse_cache: BTreeMap<TermId, TermId>,
+    pub sub_proxy_cache: BTreeMap<ClassExpression<RcStr>, TermId>,
+    pub super_proxy_cache: BTreeMap<ClassExpression<RcStr>, TermId>,
     pub proxy_terms: BTreeSet<TermId>,
+    /// Human-readable OFN display string for each proxy TermId.
+    pub proxy_display: BTreeMap<TermId, String>,
 
     // ABox assertions from ontology (OFN/OWX format)
     /// (subject, predicate, object) — ObjectPropertyAssertion / DataPropertyAssertion

@@ -9,6 +9,7 @@ pub mod owl;
 pub mod rdf;
 pub mod store;
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::time::Instant;
@@ -207,7 +208,7 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
     )?;
     let inconsistency_reports: Vec<InconsistencyReport> = inconsistencies
         .iter()
-        .map(|inc| format_inconsistency(inc, &dictionary))
+        .map(|inc| format_inconsistency(inc, &dictionary, &compiled_schema.proxy_display))
         .collect();
 
     if !inconsistencies.is_empty() {
@@ -296,14 +297,25 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
     Ok(())
 }
 
-fn format_term(id: dict::TermId, dictionary: &Dictionary) -> String {
+fn format_term(
+    id: dict::TermId,
+    dictionary: &Dictionary,
+    proxy_display: &BTreeMap<dict::TermId, String>,
+) -> String {
+    if let Some(display) = proxy_display.get(&id) {
+        return display.clone();
+    }
     match dictionary.decode(id) {
         Some(term) => term.to_ntriples(),
         None => format!("_{id}"),
     }
 }
 
-fn format_inconsistency(inc: &Inconsistency, dictionary: &Dictionary) -> InconsistencyReport {
+fn format_inconsistency(
+    inc: &Inconsistency,
+    dictionary: &Dictionary,
+    proxy_display: &BTreeMap<dict::TermId, String>,
+) -> InconsistencyReport {
     match inc {
         Inconsistency::DisjointClasses {
             individual,
@@ -313,9 +325,9 @@ fn format_inconsistency(inc: &Inconsistency, dictionary: &Dictionary) -> Inconsi
             kind: "DisjointClasses".to_string(),
             detail: format!(
                 "{} has types {} and {}, which are disjoint",
-                format_term(*individual, dictionary),
-                format_term(*class_a, dictionary),
-                format_term(*class_b, dictionary),
+                format_term(*individual, dictionary, proxy_display),
+                format_term(*class_a, dictionary, proxy_display),
+                format_term(*class_b, dictionary, proxy_display),
             ),
         },
         Inconsistency::ComplementOf {
@@ -326,9 +338,9 @@ fn format_inconsistency(inc: &Inconsistency, dictionary: &Dictionary) -> Inconsi
             kind: "ComplementOf".to_string(),
             detail: format!(
                 "{} has types {} and {}, which are complements",
-                format_term(*individual, dictionary),
-                format_term(*class, dictionary),
-                format_term(*complement, dictionary),
+                format_term(*individual, dictionary, proxy_display),
+                format_term(*class, dictionary, proxy_display),
+                format_term(*complement, dictionary, proxy_display),
             ),
         },
         Inconsistency::DisjointProperties {
@@ -340,10 +352,10 @@ fn format_inconsistency(inc: &Inconsistency, dictionary: &Dictionary) -> Inconsi
             kind: "DisjointProperties".to_string(),
             detail: format!(
                 "({}, {}) appears in both {} and {}, which are disjoint",
-                format_term(*subject, dictionary),
-                format_term(*object, dictionary),
-                format_term(*prop_a, dictionary),
-                format_term(*prop_b, dictionary),
+                format_term(*subject, dictionary, proxy_display),
+                format_term(*object, dictionary, proxy_display),
+                format_term(*prop_a, dictionary, proxy_display),
+                format_term(*prop_b, dictionary, proxy_display),
             ),
         },
         Inconsistency::MaxCardinalityZero {
@@ -355,10 +367,10 @@ fn format_inconsistency(inc: &Inconsistency, dictionary: &Dictionary) -> Inconsi
             kind: "MaxCardinalityZero".to_string(),
             detail: format!(
                 "{} (type {}) has {} link to {}, violating max cardinality 0",
-                format_term(*individual, dictionary),
-                format_term(*class, dictionary),
-                format_term(*property, dictionary),
-                format_term(*object, dictionary),
+                format_term(*individual, dictionary, proxy_display),
+                format_term(*class, dictionary, proxy_display),
+                format_term(*property, dictionary, proxy_display),
+                format_term(*object, dictionary, proxy_display),
             ),
         },
         Inconsistency::IrreflexiveProperty {
@@ -368,8 +380,8 @@ fn format_inconsistency(inc: &Inconsistency, dictionary: &Dictionary) -> Inconsi
             kind: "IrreflexiveProperty".to_string(),
             detail: format!(
                 "{} has self-link via {}, which is irreflexive",
-                format_term(*individual, dictionary),
-                format_term(*property, dictionary),
+                format_term(*individual, dictionary, proxy_display),
+                format_term(*property, dictionary, proxy_display),
             ),
         },
         Inconsistency::AsymmetricProperty {
@@ -380,9 +392,9 @@ fn format_inconsistency(inc: &Inconsistency, dictionary: &Dictionary) -> Inconsi
             kind: "AsymmetricProperty".to_string(),
             detail: format!(
                 "{} and {} are linked in both directions via {}, which is asymmetric",
-                format_term(*subject, dictionary),
-                format_term(*object, dictionary),
-                format_term(*property, dictionary),
+                format_term(*subject, dictionary, proxy_display),
+                format_term(*object, dictionary, proxy_display),
+                format_term(*property, dictionary, proxy_display),
             ),
         },
         Inconsistency::DifferentIndividuals {
@@ -392,8 +404,8 @@ fn format_inconsistency(inc: &Inconsistency, dictionary: &Dictionary) -> Inconsi
             kind: "DifferentIndividuals".to_string(),
             detail: format!(
                 "{} and {} are declared different but were merged by equality reasoning",
-                format_term(*individual_a, dictionary),
-                format_term(*individual_b, dictionary),
+                format_term(*individual_a, dictionary, proxy_display),
+                format_term(*individual_b, dictionary, proxy_display),
             ),
         },
         Inconsistency::NegativePropertyAssertion {
@@ -404,9 +416,9 @@ fn format_inconsistency(inc: &Inconsistency, dictionary: &Dictionary) -> Inconsi
             kind: "NegativePropertyAssertion".to_string(),
             detail: format!(
                 "({}, {}, {}) is asserted but negated by a negative property assertion",
-                format_term(*subject, dictionary),
-                format_term(*property, dictionary),
-                format_term(*object, dictionary),
+                format_term(*subject, dictionary, proxy_display),
+                format_term(*property, dictionary, proxy_display),
+                format_term(*object, dictionary, proxy_display),
             ),
         },
     }

@@ -102,6 +102,8 @@ pub struct CompiledSchema {
     /// Proxy TermIds created for anonymous class/property expressions.
     /// These must be filtered from output triples.
     pub proxy_terms: BTreeSet<TermId>,
+    /// Human-readable OFN display string for each proxy TermId.
+    pub proxy_display: BTreeMap<TermId, String>,
 }
 
 impl CompiledSchema {
@@ -387,6 +389,7 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
         schema_inferred: subclass_inferred + subproperty_inferred,
         rule_set: ir::RuleSet::build(),
         proxy_terms: schema.proxy_terms.clone(),
+        proxy_display: schema.proxy_display.clone(),
     }
 }
 

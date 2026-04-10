@@ -896,6 +896,82 @@ fn fresh_proxy_term(schema: &mut RawSchema, dictionary: &mut Dictionary) -> Term
     id
 }
 
+fn format_individual(ind: &horned_owl::model::Individual<RcStr>) -> String {
+    match ind {
+        horned_owl::model::Individual::Named(ni) => format!("<{}>", ni.as_ref()),
+        horned_owl::model::Individual::Anonymous(a) => format!("_{}", a.0.as_ref()),
+    }
+}
+
+fn format_ope(ope: &ObjectPropertyExpression<RcStr>) -> String {
+    match ope {
+        ObjectPropertyExpression::ObjectProperty(p) => format!("<{}>", p.as_ref()),
+        ObjectPropertyExpression::InverseObjectProperty(p) => {
+            format!("ObjectInverseOf(<{}>)", p.as_ref())
+        }
+    }
+}
+
+fn format_ce(ce: &ClassExpression<RcStr>) -> String {
+    match ce {
+        ClassExpression::Class(c) => format!("<{}>", c.as_ref()),
+        ClassExpression::ObjectSomeValuesFrom { ope, bce } => {
+            format!("ObjectSomeValuesFrom({} {})", format_ope(ope), format_ce(bce))
+        }
+        ClassExpression::ObjectAllValuesFrom { ope, bce } => {
+            format!("ObjectAllValuesFrom({} {})", format_ope(ope), format_ce(bce))
+        }
+        ClassExpression::ObjectIntersectionOf(ces) => {
+            let parts: Vec<String> = ces.iter().map(format_ce).collect();
+            format!("ObjectIntersectionOf({})", parts.join(" "))
+        }
+        ClassExpression::ObjectUnionOf(ces) => {
+            let parts: Vec<String> = ces.iter().map(format_ce).collect();
+            format!("ObjectUnionOf({})", parts.join(" "))
+        }
+        ClassExpression::ObjectComplementOf(bce) => {
+            format!("ObjectComplementOf({})", format_ce(bce))
+        }
+        ClassExpression::ObjectHasValue { ope, i } => {
+            format!("ObjectHasValue({} {})", format_ope(ope), format_individual(i))
+        }
+        ClassExpression::ObjectOneOf(inds) => {
+            let parts: Vec<String> = inds.iter().map(format_individual).collect();
+            format!("ObjectOneOf({})", parts.join(" "))
+        }
+        ClassExpression::ObjectHasSelf(ope) => {
+            format!("ObjectHasSelf({})", format_ope(ope))
+        }
+        ClassExpression::ObjectMinCardinality { n, ope, bce } => {
+            format!("ObjectMinCardinality({n} {} {})", format_ope(ope), format_ce(bce))
+        }
+        ClassExpression::ObjectMaxCardinality { n, ope, bce } => {
+            format!("ObjectMaxCardinality({n} {} {})", format_ope(ope), format_ce(bce))
+        }
+        ClassExpression::ObjectExactCardinality { n, ope, bce } => {
+            format!("ObjectExactCardinality({n} {} {})", format_ope(ope), format_ce(bce))
+        }
+        ClassExpression::DataSomeValuesFrom { dp, dr } => {
+            format!("DataSomeValuesFrom(<{}> {:?})", dp.as_ref(), dr)
+        }
+        ClassExpression::DataAllValuesFrom { dp, dr } => {
+            format!("DataAllValuesFrom(<{}> {:?})", dp.as_ref(), dr)
+        }
+        ClassExpression::DataHasValue { dp, l } => {
+            format!("DataHasValue(<{}> {:?})", dp.as_ref(), l)
+        }
+        ClassExpression::DataMinCardinality { n, dp, dr } => {
+            format!("DataMinCardinality({n} <{}> {:?})", dp.as_ref(), dr)
+        }
+        ClassExpression::DataMaxCardinality { n, dp, dr } => {
+            format!("DataMaxCardinality({n} <{}> {:?})", dp.as_ref(), dr)
+        }
+        ClassExpression::DataExactCardinality { n, dp, dr } => {
+            format!("DataExactCardinality({n} <{}> {:?})", dp.as_ref(), dr)
+        }
+    }
+}
+
 fn encode_object_property(
     ope: &ObjectPropertyExpression<RcStr>,
     dictionary: &mut Dictionary,
@@ -909,6 +985,9 @@ fn encode_object_property(
                 return proxy;
             }
             let proxy = fresh_proxy_term(schema, dictionary);
+            schema
+                .proxy_display
+                .insert(proxy, format!("ObjectInverseOf(<{}>)", p.as_ref()));
             schema.inverse_properties.insert((base, proxy));
             schema.inverse_properties.insert((proxy, base));
             schema.inverse_cache.insert(base, proxy);
@@ -930,6 +1009,7 @@ fn encode_named_class(
 /// Reify a CE in super-class position: returns a TermId.
 /// Named CEs return their TermId directly (no proxy).
 /// Anonymous CEs get a fresh proxy C with SubClassOf(C, CE) axioms.
+/// The same anonymous CE always maps to the same proxy (structural deduplication).
 fn reify_as_super(
     ce: &ClassExpression<RcStr>,
     dictionary: &mut Dictionary,
@@ -938,7 +1018,12 @@ fn reify_as_super(
     if let Ok(id) = encode_named_class(ce, dictionary) {
         return id;
     }
+    if let Some(&existing) = schema.super_proxy_cache.get(ce) {
+        return existing;
+    }
     let proxy = fresh_proxy_term(schema, dictionary);
+    schema.super_proxy_cache.insert(ce.clone(), proxy);
+    schema.proxy_display.insert(proxy, format_ce(ce));
     lower_named_sub_anon_super(proxy, ce, dictionary, schema);
     proxy
 }
@@ -946,6 +1031,7 @@ fn reify_as_super(
 /// Reify a CE in sub-class position: returns a TermId.
 /// Named CEs return their TermId directly (no proxy).
 /// Anonymous CEs get a fresh proxy C with SubClassOf(CE, C) axioms.
+/// The same anonymous CE always maps to the same proxy (structural deduplication).
 fn reify_as_sub(
     ce: &ClassExpression<RcStr>,
     dictionary: &mut Dictionary,
@@ -954,7 +1040,12 @@ fn reify_as_sub(
     if let Ok(id) = encode_named_class(ce, dictionary) {
         return id;
     }
+    if let Some(&existing) = schema.sub_proxy_cache.get(ce) {
+        return existing;
+    }
     let proxy = fresh_proxy_term(schema, dictionary);
+    schema.sub_proxy_cache.insert(ce.clone(), proxy);
+    schema.proxy_display.insert(proxy, format_ce(ce));
     lower_anon_sub_named_super(ce, proxy, dictionary, schema);
     proxy
 }
