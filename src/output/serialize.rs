@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -5,27 +6,40 @@ use std::path::Path;
 use anyhow::anyhow;
 
 use crate::cli::EmitMode;
-use crate::dict::Dictionary;
+use crate::dict::{Dictionary, TermId};
 use crate::error::Result;
 use crate::owl::RDF_TYPE_IRI;
 use crate::rdf::Term;
 use crate::store::FactStore;
 
 /// Write inferred or closure triples to an N-Triples file.
+///
+/// Triples involving proxy terms (anonymous CE / ObjectInverseOf scaffolding)
+/// are filtered out so only user-visible terms appear in the output.
 pub fn write_ntriples(
     path: &Path,
     emit: EmitMode,
     dictionary: &Dictionary,
     store: &mut FactStore,
+    proxy_terms: &BTreeSet<TermId>,
 ) -> Result<usize> {
     let writer = File::create(path)?;
     let mut writer = BufWriter::with_capacity(256 * 1024, writer);
     let mut written = 0usize;
 
+    let is_proxy_type =
+        |inst: TermId, cls: TermId| proxy_terms.contains(&inst) || proxy_terms.contains(&cls);
+    let is_proxy_prop = |s: TermId, p: TermId, o: TermId| {
+        proxy_terms.contains(&s) || proxy_terms.contains(&p) || proxy_terms.contains(&o)
+    };
+
     match emit {
         EmitMode::Inferred => {
             for result in store.derived_types_iter()? {
                 let (instance, class) = result?;
+                if is_proxy_type(instance, class) {
+                    continue;
+                }
                 writeln!(
                     writer,
                     "{}",
@@ -35,6 +49,9 @@ pub fn write_ntriples(
             }
             for result in store.derived_properties_iter()? {
                 let (subject, predicate, object) = result?;
+                if is_proxy_prop(subject, predicate, object) {
+                    continue;
+                }
                 writeln!(
                     writer,
                     "{}",
@@ -46,6 +63,9 @@ pub fn write_ntriples(
         EmitMode::Closure => {
             for result in store.known_types_iter()? {
                 let (instance, class) = result?;
+                if is_proxy_type(instance, class) {
+                    continue;
+                }
                 writeln!(
                     writer,
                     "{}",
@@ -55,6 +75,9 @@ pub fn write_ntriples(
             }
             for result in store.known_properties_iter()? {
                 let (subject, predicate, object) = result?;
+                if is_proxy_prop(subject, predicate, object) {
+                    continue;
+                }
                 writeln!(
                     writer,
                     "{}",

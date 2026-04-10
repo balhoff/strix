@@ -149,6 +149,15 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
     let compiled_schema = compile_schema(&schema, well_known.owl_thing);
     let schema_compile_time_ms = compile_timer.elapsed_ms();
 
+    // Inject type assertions from ontology ABox axioms (OneOf subclass, ClassAssertion)
+    for &(individual, class) in &schema.one_of_types {
+        store.insert_asserted_type(individual, class)?;
+    }
+    // Inject property assertions from ontology ABox (ObjectPropertyAssertion, DataPropertyAssertion)
+    for &(subject, predicate, object) in &schema.extra_property_assertions {
+        store.insert_asserted_property(subject, predicate, object)?;
+    }
+
     tracing::info!("Materializing inferences");
     let reasoning_timer = StageTimer::start();
     let MaterializeResult {
@@ -167,11 +176,34 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
     let mut all_different_pairs = compiled_schema.different_individual_pairs.clone();
     all_different_pairs.extend_from_slice(&swrl_different_pairs);
 
+    // Build disjoint-property assertions index once, shared by both
+    // DifferentIndividuals inference and DisjointProperties inconsistency check.
+    let disjoint_prop_assertions = if !compiled_schema.disjoint_property_pairs.is_empty() {
+        let mut relevant_props = std::collections::BTreeSet::new();
+        for &(a, b) in &compiled_schema.disjoint_property_pairs {
+            relevant_props.insert(a);
+            relevant_props.insert(b);
+        }
+        Some(inconsistency::collect_property_assertions(
+            &mut store,
+            &relevant_props,
+        )?)
+    } else {
+        None
+    };
+
+    if let Some(ref idx) = disjoint_prop_assertions {
+        let disjoint_prop_different =
+            engine::infer_different_from_disjoint_properties(idx, &compiled_schema);
+        all_different_pairs.extend_from_slice(&disjoint_prop_different);
+    }
+
     let inconsistencies = inconsistency::check_inconsistencies(
         &mut store,
         &compiled_schema,
         Some(&mut union_find),
         &all_different_pairs,
+        disjoint_prop_assertions.as_ref(),
     )?;
     let inconsistency_reports: Vec<InconsistencyReport> = inconsistencies
         .iter()
@@ -190,14 +222,24 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
             anyhow::bail!(
                 "{} inconsistenc{} detected (use --inconsistency-mode report to continue)",
                 inconsistencies.len(),
-                if inconsistencies.len() == 1 { "y" } else { "ies" }
+                if inconsistencies.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                }
             );
         }
     }
 
     tracing::info!("Writing output");
     let export_timer = StageTimer::start();
-    let written_triples = write_ntriples(&args.output, args.emit, &dictionary, &mut store)?;
+    let written_triples = write_ntriples(
+        &args.output,
+        args.emit,
+        &dictionary,
+        &mut store,
+        &compiled_schema.proxy_terms,
+    )?;
     let export_time_ms = export_timer.elapsed_ms();
 
     if let Some(report_path) = &args.report {

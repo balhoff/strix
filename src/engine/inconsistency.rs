@@ -60,11 +60,12 @@ pub fn check_inconsistencies(
     schema: &CompiledSchema,
     union_find: Option<&mut UnionFind>,
     different_pairs: &[(TermId, TermId)],
+    disjoint_prop_assertions: Option<&BTreeMap<TermId, BTreeSet<(TermId, TermId)>>>,
 ) -> Result<Vec<Inconsistency>> {
     let mut results = Vec::new();
 
     check_disjoint_types(store, schema, &mut results)?;
-    check_disjoint_properties(store, schema, &mut results)?;
+    check_disjoint_properties(store, schema, disjoint_prop_assertions, &mut results)?;
     check_max_card_zero(store, schema, &mut results)?;
     check_irreflexive_properties(store, schema, &mut results)?;
     check_asymmetric_properties(store, schema, &mut results)?;
@@ -110,9 +111,7 @@ fn check_disjoint_types(
 
     // Check disjoint class pairs.
     for &(a, b) in &schema.disjoint_class_pairs {
-        if let (Some(insts_a), Some(insts_b)) =
-            (class_instances.get(&a), class_instances.get(&b))
-        {
+        if let (Some(insts_a), Some(insts_b)) = (class_instances.get(&a), class_instances.get(&b)) {
             for &ind in insts_a {
                 if insts_b.contains(&ind) {
                     results.push(Inconsistency::DisjointClasses {
@@ -146,7 +145,7 @@ fn check_disjoint_types(
 }
 
 /// Build prop → {(subject, object)} for a filtered set of predicates.
-fn collect_property_assertions(
+pub fn collect_property_assertions(
     store: &mut FactStore,
     relevant_props: &BTreeSet<TermId>,
 ) -> Result<BTreeMap<TermId, BTreeSet<(TermId, TermId)>>> {
@@ -167,23 +166,30 @@ fn collect_property_assertions(
 fn check_disjoint_properties(
     store: &mut FactStore,
     schema: &CompiledSchema,
+    prebuilt: Option<&BTreeMap<TermId, BTreeSet<(TermId, TermId)>>>,
     results: &mut Vec<Inconsistency>,
 ) -> Result<()> {
     if schema.disjoint_property_pairs.is_empty() {
         return Ok(());
     }
 
-    let mut relevant_props: BTreeSet<TermId> = BTreeSet::new();
-    for &(a, b) in &schema.disjoint_property_pairs {
-        relevant_props.insert(a);
-        relevant_props.insert(b);
-    }
-
-    let prop_assertions = collect_property_assertions(store, &relevant_props)?;
+    // Reuse pre-built index if available, otherwise build from scratch.
+    let owned;
+    let prop_assertions = match prebuilt {
+        Some(idx) => idx,
+        None => {
+            let mut relevant_props: BTreeSet<TermId> = BTreeSet::new();
+            for &(a, b) in &schema.disjoint_property_pairs {
+                relevant_props.insert(a);
+                relevant_props.insert(b);
+            }
+            owned = collect_property_assertions(store, &relevant_props)?;
+            &owned
+        }
+    };
 
     for &(pa, pb) in &schema.disjoint_property_pairs {
-        if let (Some(pairs_a), Some(pairs_b)) =
-            (prop_assertions.get(&pa), prop_assertions.get(&pb))
+        if let (Some(pairs_a), Some(pairs_b)) = (prop_assertions.get(&pa), prop_assertions.get(&pb))
         {
             for &(s, o) in pairs_a {
                 if pairs_b.contains(&(s, o)) {

@@ -403,13 +403,8 @@ fn absorb_ontology(
                 let ids: Vec<TermId> = axiom
                     .0
                     .iter()
-                    .filter_map(|ce| encode_named_class(ce, dictionary).ok())
+                    .map(|ce| reify_as_sub(ce, dictionary, schema))
                     .collect();
-                if ids.len() < axiom.0.len() {
-                    schema.unsupported.insert(
-                        "DisjointClasses with anonymous class expression members".to_string(),
-                    );
-                }
                 if ids.len() >= 2 {
                     schema.disjoint_classes.push(ids);
                 }
@@ -418,18 +413,15 @@ fn absorb_ontology(
             // DisjointUnion → union decomposition (SubClassOf(Ci, C)) + pairwise disjoint
             Component::DisjointUnion(axiom) => {
                 let parent = dictionary.encode_iri(axiom.0.as_ref());
-                let mut member_ids = Vec::new();
-                for ce in &axiom.1 {
-                    if let Ok(member) = encode_named_class(ce, dictionary) {
+                let member_ids: Vec<TermId> = axiom
+                    .1
+                    .iter()
+                    .map(|ce| {
+                        let member = reify_as_sub(ce, dictionary, schema);
                         schema.subclasses.insert((member, parent));
-                        member_ids.push(member);
-                    }
-                }
-                if member_ids.len() < axiom.1.len() {
-                    schema.unsupported.insert(
-                        "DisjointUnion with anonymous class expression members".to_string(),
-                    );
-                }
+                        member
+                    })
+                    .collect();
                 if member_ids.len() >= 2 {
                     schema.disjoint_classes.push(member_ids);
                 }
@@ -438,34 +430,18 @@ fn absorb_ontology(
             // SubObjectPropertyOf — named or chain
             Component::SubObjectPropertyOf(axiom) => match &axiom.sub {
                 SubObjectPropertyExpression::ObjectPropertyExpression(sub_expr) => {
-                    match (
-                        encode_named_object_property(sub_expr, dictionary),
-                        encode_named_object_property(&axiom.sup, dictionary),
-                    ) {
-                        (Ok(sub), Ok(sup)) => {
-                            schema.subproperties.insert((sub, sup));
-                        }
-                        _ => {
-                            schema.unsupported.insert(
-                                "SubObjectPropertyOf with inverse property expressions"
-                                    .to_string(),
-                            );
-                        }
-                    }
+                    let sub = encode_object_property(sub_expr, dictionary, schema);
+                    let sup = encode_object_property(&axiom.sup, dictionary, schema);
+                    schema.subproperties.insert((sub, sup));
                 }
                 SubObjectPropertyExpression::ObjectPropertyChain(chain) => {
-                    if let Ok(sup) = encode_named_object_property(&axiom.sup, dictionary) {
-                        let chain_ids: Vec<TermId> = chain
-                            .iter()
-                            .filter_map(|ope| encode_named_object_property(ope, dictionary).ok())
-                            .collect();
-                        if chain_ids.len() == chain.len() && chain_ids.len() >= 2 {
-                            schema.property_chains.push((sup, chain_ids));
-                        } else {
-                            schema.unsupported.insert(
-                                "property chain with inverse property expressions".to_string(),
-                            );
-                        }
+                    let sup = encode_object_property(&axiom.sup, dictionary, schema);
+                    let chain_ids: Vec<TermId> = chain
+                        .iter()
+                        .map(|ope| encode_object_property(ope, dictionary, schema))
+                        .collect();
+                    if chain_ids.len() >= 2 {
+                        schema.property_chains.push((sup, chain_ids));
                     }
                 }
             },
@@ -475,21 +451,10 @@ fn absorb_ontology(
                 let props = &axiom.0;
                 for i in 0..props.len() {
                     for j in (i + 1)..props.len() {
-                        match (
-                            encode_named_object_property(&props[i], dictionary),
-                            encode_named_object_property(&props[j], dictionary),
-                        ) {
-                            (Ok(a), Ok(b)) => {
-                                schema.subproperties.insert((a, b));
-                                schema.subproperties.insert((b, a));
-                            }
-                            _ => {
-                                schema.unsupported.insert(
-                                    "EquivalentObjectProperties with inverse property expression"
-                                        .to_string(),
-                                );
-                            }
-                        }
+                        let a = encode_object_property(&props[i], dictionary, schema);
+                        let b = encode_object_property(&props[j], dictionary, schema);
+                        schema.subproperties.insert((a, b));
+                        schema.subproperties.insert((b, a));
                     }
                 }
             }
@@ -512,14 +477,8 @@ fn absorb_ontology(
                 let ids: Vec<TermId> = axiom
                     .0
                     .iter()
-                    .filter_map(|ope| encode_named_object_property(ope, dictionary).ok())
+                    .map(|ope| encode_object_property(ope, dictionary, schema))
                     .collect();
-                if ids.len() < axiom.0.len() {
-                    schema.unsupported.insert(
-                        "DisjointObjectProperties with inverse property expression members"
-                            .to_string(),
-                    );
-                }
                 if ids.len() >= 2 {
                     schema.disjoint_properties.push(ids);
                 }
@@ -535,70 +494,33 @@ fn absorb_ontology(
 
             // Property characteristics
             Component::FunctionalObjectProperty(axiom) => {
-                if let Ok(prop) = encode_named_object_property(&axiom.0, dictionary) {
-                    schema.functional_properties.insert(prop);
-                } else {
-                    schema.unsupported.insert(
-                        "FunctionalObjectProperty with inverse property expression".to_string(),
-                    );
-                }
+                let prop = encode_object_property(&axiom.0, dictionary, schema);
+                schema.functional_properties.insert(prop);
             }
             Component::InverseFunctionalObjectProperty(axiom) => {
-                if let Ok(prop) = encode_named_object_property(&axiom.0, dictionary) {
-                    schema.inverse_functional_properties.insert(prop);
-                } else {
-                    schema.unsupported.insert(
-                        "InverseFunctionalObjectProperty with inverse property expression"
-                            .to_string(),
-                    );
-                }
+                let prop = encode_object_property(&axiom.0, dictionary, schema);
+                schema.inverse_functional_properties.insert(prop);
             }
             Component::SymmetricObjectProperty(axiom) => {
-                if let Ok(prop) = encode_named_object_property(&axiom.0, dictionary) {
-                    schema.symmetric_properties.insert(prop);
-                } else {
-                    schema.unsupported.insert(
-                        "SymmetricObjectProperty with inverse property expression".to_string(),
-                    );
-                }
+                let prop = encode_object_property(&axiom.0, dictionary, schema);
+                schema.symmetric_properties.insert(prop);
             }
             Component::TransitiveObjectProperty(axiom) => {
-                if let Ok(prop) = encode_named_object_property(&axiom.0, dictionary) {
-                    schema.transitive_properties.insert(prop);
-                } else {
-                    schema.unsupported.insert(
-                        "TransitiveObjectProperty with inverse property expression".to_string(),
-                    );
-                }
+                let prop = encode_object_property(&axiom.0, dictionary, schema);
+                schema.transitive_properties.insert(prop);
             }
 
             // Domain/Range
-            Component::ObjectPropertyDomain(axiom) => match (
-                encode_named_object_property(&axiom.ope, dictionary),
-                encode_named_class(&axiom.ce, dictionary),
-            ) {
-                (Ok(property), Ok(class)) => {
-                    schema.domains.insert((property, class));
-                }
-                _ => {
-                    schema.unsupported.insert(
-                        "ObjectPropertyDomain with anonymous class expression".to_string(),
-                    );
-                }
-            },
-            Component::ObjectPropertyRange(axiom) => match (
-                encode_named_object_property(&axiom.ope, dictionary),
-                encode_named_class(&axiom.ce, dictionary),
-            ) {
-                (Ok(property), Ok(class)) => {
-                    schema.ranges.insert((property, class));
-                }
-                _ => {
-                    schema.unsupported.insert(
-                        "ObjectPropertyRange with anonymous class expression".to_string(),
-                    );
-                }
-            },
+            Component::ObjectPropertyDomain(axiom) => {
+                let property = encode_object_property(&axiom.ope, dictionary, schema);
+                let class = reify_as_super(&axiom.ce, dictionary, schema);
+                schema.domains.insert((property, class));
+            }
+            Component::ObjectPropertyRange(axiom) => {
+                let property = encode_object_property(&axiom.ope, dictionary, schema);
+                let class = reify_as_super(&axiom.ce, dictionary, schema);
+                schema.ranges.insert((property, class));
+            }
 
             Component::SubDataPropertyOf(axiom) => {
                 let subproperty = dictionary.encode_iri(axiom.sub.as_ref());
@@ -612,18 +534,11 @@ fn absorb_ontology(
                     schema.subproperties.insert((subproperty, superproperty));
                 }
             }
-            Component::DataPropertyDomain(axiom) => match encode_named_class(&axiom.ce, dictionary)
-            {
-                Ok(class) => {
-                    let property = dictionary.encode_iri(axiom.dp.as_ref());
-                    schema.domains.insert((property, class));
-                }
-                Err(_) => {
-                    schema.unsupported.insert(
-                        "DataPropertyDomain with anonymous class expression".to_string(),
-                    );
-                }
-            },
+            Component::DataPropertyDomain(axiom) => {
+                let property = dictionary.encode_iri(axiom.dp.as_ref());
+                let class = reify_as_super(&axiom.ce, dictionary, schema);
+                schema.domains.insert((property, class));
+            }
             Component::FunctionalDataProperty(axiom) => {
                 let prop = dictionary.encode_iri(axiom.0.as_ref());
                 schema.functional_properties.insert(prop);
@@ -656,8 +571,8 @@ fn absorb_ontology(
                 }
             }
             Component::NegativeObjectPropertyAssertion(axiom) => {
-                if let (Ok(prop), Ok(from), Ok(to)) = (
-                    encode_named_object_property(&axiom.ope, dictionary),
+                let prop = encode_object_property(&axiom.ope, dictionary, schema);
+                if let (Ok(from), Ok(to)) = (
                     encode_individual(&axiom.from, dictionary),
                     encode_individual(&axiom.to, dictionary),
                 ) {
@@ -675,9 +590,28 @@ fn absorb_ontology(
                         .push((prop, from, value));
                 }
             }
-            Component::ClassAssertion(_)
-            | Component::ObjectPropertyAssertion(_)
-            | Component::DataPropertyAssertion(_) => {}
+            Component::ClassAssertion(axiom) => {
+                if let Ok(ind_id) = encode_individual(&axiom.i, dictionary) {
+                    let class_id = reify_as_super(&axiom.ce, dictionary, schema);
+                    schema.one_of_types.push((ind_id, class_id));
+                }
+            }
+            Component::ObjectPropertyAssertion(axiom) => {
+                let prop = encode_object_property(&axiom.ope, dictionary, schema);
+                if let (Ok(from), Ok(to)) = (
+                    encode_individual(&axiom.from, dictionary),
+                    encode_individual(&axiom.to, dictionary),
+                ) {
+                    schema.extra_property_assertions.push((from, prop, to));
+                }
+            }
+            Component::DataPropertyAssertion(axiom) => {
+                if let Ok(from) = encode_individual(&axiom.from, dictionary) {
+                    let prop = dictionary.encode_iri(axiom.dp.as_ref());
+                    let value = dictionary.encode(encode_horned_literal(&axiom.to));
+                    schema.extra_property_assertions.push((from, prop, value));
+                }
+            }
 
             // Deferred
             Component::Import(_) => {
@@ -688,57 +622,48 @@ fn absorb_ontology(
             Component::DataPropertyRange(_)
             | Component::DisjointDataProperties(_)
             | Component::DatatypeDefinition { .. } => {
-                schema.unsupported.insert(
-                    "data property restrictions deferred to a later phase".to_string(),
-                );
+                schema
+                    .unsupported
+                    .insert("data property restrictions deferred to a later phase".to_string());
             }
             Component::IrreflexiveObjectProperty(axiom) => {
-                if let Ok(prop) = encode_named_object_property(&axiom.0, dictionary) {
-                    schema.irreflexive_properties.insert(prop);
-                } else {
-                    schema.unsupported.insert(
-                        "IrreflexiveObjectProperty with inverse property expression".to_string(),
-                    );
-                }
+                let prop = encode_object_property(&axiom.0, dictionary, schema);
+                schema.irreflexive_properties.insert(prop);
             }
             Component::AsymmetricObjectProperty(axiom) => {
-                if let Ok(prop) = encode_named_object_property(&axiom.0, dictionary) {
-                    schema.asymmetric_properties.insert(prop);
-                } else {
-                    schema.unsupported.insert(
-                        "AsymmetricObjectProperty with inverse property expression".to_string(),
-                    );
-                }
+                let prop = encode_object_property(&axiom.0, dictionary, schema);
+                schema.asymmetric_properties.insert(prop);
             }
             Component::ReflexiveObjectProperty(_) => {
-                schema.unsupported.insert(
-                    "ReflexiveObjectProperty not yet implemented".to_string(),
-                );
+                schema
+                    .unsupported
+                    .insert("ReflexiveObjectProperty not yet implemented".to_string());
             }
             Component::HasKey(axiom) => {
-                if let Ok(class) = encode_named_class(&axiom.ce, dictionary) {
-                    let props: Vec<TermId> = axiom
-                        .vpe
-                        .iter()
-                        .filter_map(|pe| match pe {
-                            PropertyExpression::ObjectPropertyExpression(ope) => {
-                                encode_named_object_property(ope, dictionary).ok()
-                            }
-                            PropertyExpression::DataProperty(dp) => {
-                                Some(dictionary.encode_iri(dp.as_ref()))
-                            }
-                            PropertyExpression::AnnotationProperty(_) => None,
-                        })
-                        .collect();
-                    if !props.is_empty() {
-                        schema.has_key.push((class, props));
-                    }
+                let class = reify_as_sub(&axiom.ce, dictionary, schema);
+                let props: Vec<TermId> = axiom
+                    .vpe
+                    .iter()
+                    .filter_map(|pe| match pe {
+                        PropertyExpression::ObjectPropertyExpression(ope) => {
+                            Some(encode_object_property(ope, dictionary, schema))
+                        }
+                        PropertyExpression::DataProperty(dp) => {
+                            Some(dictionary.encode_iri(dp.as_ref()))
+                        }
+                        PropertyExpression::AnnotationProperty(_) => None,
+                    })
+                    .collect();
+                if !props.is_empty() {
+                    schema.has_key.push((class, props));
                 }
             }
             Component::Rule(axiom) => {
                 match parse_swrl_rule(&axiom.head, &axiom.body, dictionary, schema) {
                     Ok(rule) => schema.swrl_rules.push(rule),
-                    Err(reason) => { schema.unsupported.insert(reason); }
+                    Err(reason) => {
+                        schema.unsupported.insert(reason);
+                    }
                 }
             }
         }
@@ -773,11 +698,11 @@ fn lower_subclass_of(
             lower_anon_sub_named_super(sub, sup_id, dictionary, schema);
         }
 
-        // Both anonymous — not handled
+        // Both anonymous — reify each side
         _ => {
-            schema
-                .unsupported
-                .insert("SubClassOf with both sub and super anonymous".to_string());
+            let sub_id = reify_as_sub(sub, dictionary, schema);
+            let sup_id = reify_as_super(sup, dictionary, schema);
+            schema.subclasses.insert((sub_id, sup_id));
         }
     }
 }
@@ -802,54 +727,35 @@ fn lower_named_sub_anon_super(
         }
         // A ⊆ ∀P.B → allValuesFrom(A, P, B)
         ClassExpression::ObjectAllValuesFrom { ope, bce } => {
-            if let (Ok(prop), Ok(filler)) = (
-                encode_named_object_property(ope, dictionary),
-                encode_named_class(bce, dictionary),
-            ) {
-                schema.all_values_from.push((sub_id, prop, filler));
-            } else {
-                schema.unsupported.insert(
-                    "AllValuesFrom with inverse property or anonymous filler class".to_string(),
-                );
-            }
+            let prop = encode_object_property(ope, dictionary, schema);
+            let filler = reify_as_super(bce, dictionary, schema);
+            schema.all_values_from.push((sub_id, prop, filler));
         }
         // A ⊆ ∃P.{v} → has_value_sub(A, P, v) (cls-hv2: type(x,A) → property(x,P,v))
         ClassExpression::ObjectHasValue { ope, i } => {
-            if let (Ok(prop), Ok(val)) = (
-                encode_named_object_property(ope, dictionary),
-                encode_individual(i, dictionary),
-            ) {
+            let prop = encode_object_property(ope, dictionary, schema);
+            if let Ok(val) = encode_individual(i, dictionary) {
                 schema.has_value_sub.push((sub_id, prop, val));
             } else {
-                schema.unsupported.insert(
-                    "HasValue with inverse property or anonymous individual".to_string(),
-                );
+                schema
+                    .unsupported
+                    .insert("HasValue with anonymous individual".to_string());
             }
         }
         // A ⊆ MaxCard(n, P, C)
         ClassExpression::ObjectMaxCardinality { n, ope, bce } => {
-            if let Ok(prop) = encode_named_object_property(ope, dictionary) {
-                let filler = encode_named_class(bce, dictionary).ok();
-                match n {
-                    0 => schema.max_card_zero.push((sub_id, prop, filler)),
-                    1 => schema.max_card_one.push((sub_id, prop, filler)),
-                    _ => {} // MaxCard ≥ 2 has no RL inference
-                }
-            } else {
-                schema.unsupported.insert(
-                    "ObjectMaxCardinality with inverse property expression".to_string(),
-                );
+            let prop = encode_object_property(ope, dictionary, schema);
+            let filler = Some(reify_as_sub(bce, dictionary, schema));
+            match n {
+                0 => schema.max_card_zero.push((sub_id, prop, filler)),
+                1 => schema.max_card_one.push((sub_id, prop, filler)),
+                _ => {} // MaxCard ≥ 2 has no RL inference
             }
         }
         // A ⊆ ¬D → complementOf(A, D) for inconsistency detection
         ClassExpression::ObjectComplementOf(bce) => {
-            if let Ok(comp) = encode_named_class(bce, dictionary) {
-                schema.complement_of.insert((sub_id, comp));
-            } else {
-                schema.unsupported.insert(
-                    "ObjectComplementOf with anonymous filler class".to_string(),
-                );
-            }
+            let comp = reify_as_sub(bce, dictionary, schema);
+            schema.complement_of.insert((sub_id, comp));
         }
         // Not useful for RL in this direction
         ClassExpression::ObjectSomeValuesFrom { .. }
@@ -884,14 +790,10 @@ fn lower_anon_sub_named_super(
         ClassExpression::ObjectIntersectionOf(conjuncts) => {
             let conjunct_ids: Vec<TermId> = conjuncts
                 .iter()
-                .filter_map(|ce| encode_named_class(ce, dictionary).ok())
+                .map(|ce| reify_as_sub(ce, dictionary, schema))
                 .collect();
-            if conjunct_ids.len() == conjuncts.len() && conjunct_ids.len() >= 2 {
+            if conjunct_ids.len() >= 2 {
                 schema.intersection_of.push((sup_id, conjunct_ids));
-            } else {
-                schema.unsupported.insert(
-                    "IntersectionOf subclass with anonymous conjunct classes".to_string(),
-                );
             }
         }
         // C1 ∪ C2 ∪ ... ⊆ C → SubClassOf(Ci, C) for each
@@ -902,28 +804,19 @@ fn lower_anon_sub_named_super(
         }
         // ∃P.D ⊆ C → someValuesFrom(C, P, D)
         ClassExpression::ObjectSomeValuesFrom { ope, bce } => {
-            if let (Ok(prop), Ok(filler)) = (
-                encode_named_object_property(ope, dictionary),
-                encode_named_class(bce, dictionary),
-            ) {
-                schema.some_values_from.push((sup_id, prop, filler));
-            } else {
-                schema.unsupported.insert(
-                    "SomeValuesFrom with inverse property or anonymous filler class".to_string(),
-                );
-            }
+            let prop = encode_object_property(ope, dictionary, schema);
+            let filler = reify_as_sub(bce, dictionary, schema);
+            schema.some_values_from.push((sup_id, prop, filler));
         }
         // ∃P.{v} ⊆ C → has_value_super(C, P, v) (cls-hv1: property(x,P,v) → type(x,C))
         ClassExpression::ObjectHasValue { ope, i } => {
-            if let (Ok(prop), Ok(val)) = (
-                encode_named_object_property(ope, dictionary),
-                encode_individual(i, dictionary),
-            ) {
+            let prop = encode_object_property(ope, dictionary, schema);
+            if let Ok(val) = encode_individual(i, dictionary) {
                 schema.has_value_super.push((sup_id, prop, val));
             } else {
-                schema.unsupported.insert(
-                    "HasValue with inverse property or anonymous individual".to_string(),
-                );
+                schema
+                    .unsupported
+                    .insert("HasValue with anonymous individual".to_string());
             }
         }
         // {a1,...,an} ⊆ C → type(ai, C) for each named individual
@@ -936,9 +829,9 @@ fn lower_anon_sub_named_super(
                 }
             }
             if !any_encoded {
-                schema.unsupported.insert(
-                    "ObjectOneOf with only anonymous individuals".to_string(),
-                );
+                schema
+                    .unsupported
+                    .insert("ObjectOneOf with only anonymous individuals".to_string());
             }
         }
         // Not useful for RL in this direction
@@ -996,6 +889,34 @@ fn serialize_triples_to_ntriples(triples: &[Triple]) -> Vec<u8> {
     output
 }
 
+fn fresh_proxy_term(schema: &mut RawSchema, dictionary: &mut Dictionary) -> TermId {
+    schema.proxy_counter += 1;
+    let id = dictionary.encode_iri(&format!("urn:strix:anon:{}", schema.proxy_counter));
+    schema.proxy_terms.insert(id);
+    id
+}
+
+fn encode_object_property(
+    ope: &ObjectPropertyExpression<RcStr>,
+    dictionary: &mut Dictionary,
+    schema: &mut RawSchema,
+) -> TermId {
+    match ope {
+        ObjectPropertyExpression::ObjectProperty(p) => dictionary.encode_iri(p.as_ref()),
+        ObjectPropertyExpression::InverseObjectProperty(p) => {
+            let base = dictionary.encode_iri(p.as_ref());
+            if let Some(&proxy) = schema.inverse_cache.get(&base) {
+                return proxy;
+            }
+            let proxy = fresh_proxy_term(schema, dictionary);
+            schema.inverse_properties.insert((base, proxy));
+            schema.inverse_properties.insert((proxy, base));
+            schema.inverse_cache.insert(base, proxy);
+            proxy
+        }
+    }
+}
+
 fn encode_named_class(
     expression: &ClassExpression<RcStr>,
     dictionary: &mut Dictionary,
@@ -1006,14 +927,36 @@ fn encode_named_class(
     }
 }
 
-fn encode_named_object_property(
-    expression: &ObjectPropertyExpression<RcStr>,
+/// Reify a CE in super-class position: returns a TermId.
+/// Named CEs return their TermId directly (no proxy).
+/// Anonymous CEs get a fresh proxy C with SubClassOf(C, CE) axioms.
+fn reify_as_super(
+    ce: &ClassExpression<RcStr>,
     dictionary: &mut Dictionary,
-) -> std::result::Result<TermId, ()> {
-    match expression.as_property() {
-        Some(property) => Ok(dictionary.encode_iri(property.as_ref())),
-        None => Err(()),
+    schema: &mut RawSchema,
+) -> TermId {
+    if let Ok(id) = encode_named_class(ce, dictionary) {
+        return id;
     }
+    let proxy = fresh_proxy_term(schema, dictionary);
+    lower_named_sub_anon_super(proxy, ce, dictionary, schema);
+    proxy
+}
+
+/// Reify a CE in sub-class position: returns a TermId.
+/// Named CEs return their TermId directly (no proxy).
+/// Anonymous CEs get a fresh proxy C with SubClassOf(CE, C) axioms.
+fn reify_as_sub(
+    ce: &ClassExpression<RcStr>,
+    dictionary: &mut Dictionary,
+    schema: &mut RawSchema,
+) -> TermId {
+    if let Ok(id) = encode_named_class(ce, dictionary) {
+        return id;
+    }
+    let proxy = fresh_proxy_term(schema, dictionary);
+    lower_anon_sub_named_super(ce, proxy, dictionary, schema);
+    proxy
 }
 
 fn encode_horned_literal(lit: &Literal<RcStr>) -> RdfTerm {
@@ -1047,7 +990,7 @@ fn parse_swrl_rule(
 ) -> std::result::Result<RawSwrlRule, String> {
     let mut raw_body = Vec::new();
     for atom in body {
-        match convert_swrl_atom(atom, dictionary) {
+        match convert_swrl_atom(atom, dictionary, schema, false) {
             Ok(a) => raw_body.push(a),
             Err(reason) => {
                 schema.unsupported.insert(reason);
@@ -1058,7 +1001,7 @@ fn parse_swrl_rule(
 
     let mut raw_head = Vec::new();
     for atom in head {
-        match convert_swrl_atom(atom, dictionary) {
+        match convert_swrl_atom(atom, dictionary, schema, true) {
             Ok(a) => raw_head.push(a),
             Err(reason) => {
                 schema.unsupported.insert(reason);
@@ -1083,20 +1026,30 @@ fn parse_swrl_rule(
 fn convert_swrl_atom(
     atom: &Atom<RcStr>,
     dictionary: &mut Dictionary,
+    schema: &mut RawSchema,
+    is_head: bool,
 ) -> std::result::Result<RawSwrlAtom, String> {
     match atom {
         Atom::ClassAtom { pred, arg } => {
-            let class = encode_named_class(pred, dictionary)
-                .map_err(|()| "SWRL ClassAtom with anonymous class expression".to_string())?;
+            // Body ClassAtom: class acts as a filter (sub position)
+            // Head ClassAtom: class is being asserted (super position)
+            let class = if is_head {
+                reify_as_super(pred, dictionary, schema)
+            } else {
+                reify_as_sub(pred, dictionary, schema)
+            };
             let arg = convert_iargument(arg, dictionary)?;
             Ok(RawSwrlAtom::ClassAtom { class, arg })
         }
         Atom::ObjectPropertyAtom { pred, args } => {
-            let property = encode_named_object_property(pred, dictionary)
-                .map_err(|()| "SWRL ObjectPropertyAtom with inverse property expression".to_string())?;
+            let property = encode_object_property(pred, dictionary, schema);
             let subject = convert_iargument(&args.0, dictionary)?;
             let object = convert_iargument(&args.1, dictionary)?;
-            Ok(RawSwrlAtom::PropertyAtom { property, subject, object })
+            Ok(RawSwrlAtom::PropertyAtom {
+                property,
+                subject,
+                object,
+            })
         }
         Atom::SameIndividualAtom(left, right) => {
             let left = convert_iargument(left, dictionary)?;
@@ -1108,15 +1061,9 @@ fn convert_swrl_atom(
             let right = convert_iargument(right, dictionary)?;
             Ok(RawSwrlAtom::DifferentIndividualsAtom { left, right })
         }
-        Atom::DataPropertyAtom { .. } => {
-            Err("SWRL DataPropertyAtom not supported".to_string())
-        }
-        Atom::DataRangeAtom { .. } => {
-            Err("SWRL DataRangeAtom not supported".to_string())
-        }
-        Atom::BuiltInAtom { .. } => {
-            Err("SWRL BuiltInAtom not supported".to_string())
-        }
+        Atom::DataPropertyAtom { .. } => Err("SWRL DataPropertyAtom not supported".to_string()),
+        Atom::DataRangeAtom { .. } => Err("SWRL DataRangeAtom not supported".to_string()),
+        Atom::BuiltInAtom { .. } => Err("SWRL BuiltInAtom not supported".to_string()),
     }
 }
 

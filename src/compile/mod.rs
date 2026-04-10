@@ -98,6 +98,10 @@ pub struct CompiledSchema {
     pub schema_iterations: usize,
     pub schema_inferred: usize,
     pub rule_set: ir::RuleSet,
+
+    /// Proxy TermIds created for anonymous class/property expressions.
+    /// These must be filtered from output triples.
+    pub proxy_terms: BTreeSet<TermId>,
 }
 
 impl CompiledSchema {
@@ -172,10 +176,16 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
     let mut has_value_by_prop: BTreeMap<TermId, Vec<(TermId, TermId)>> = BTreeMap::new();
     let mut has_value_by_class: BTreeMap<TermId, Vec<(TermId, TermId)>> = BTreeMap::new();
     for &(class, prop, val) in &schema.has_value_super {
-        has_value_by_prop.entry(prop).or_default().push((class, val));
+        has_value_by_prop
+            .entry(prop)
+            .or_default()
+            .push((class, val));
     }
     for &(class, prop, val) in &schema.has_value_sub {
-        has_value_by_class.entry(class).or_default().push((prop, val));
+        has_value_by_class
+            .entry(class)
+            .or_default()
+            .push((prop, val));
     }
 
     // someValuesFrom: separate owl:Thing filler into property-existence rules
@@ -354,7 +364,11 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
         max_card_zero,
         irreflexive_properties: schema.irreflexive_properties.clone(),
         asymmetric_properties: schema.asymmetric_properties.clone(),
-        has_key_preds: schema.has_key.iter().flat_map(|(_, ps)| ps.iter().copied()).collect(),
+        has_key_preds: schema
+            .has_key
+            .iter()
+            .flat_map(|(_, ps)| ps.iter().copied())
+            .collect(),
         has_key: schema.has_key.clone(),
         same_individual_pairs: flatten_pairwise(&schema.same_individuals),
         different_individual_pairs: flatten_pairwise(&schema.different_individuals),
@@ -372,6 +386,7 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
         schema_iterations: subclass_iterations.max(subproperty_iterations),
         schema_inferred: subclass_inferred + subproperty_inferred,
         rule_set: ir::RuleSet::build(),
+        proxy_terms: schema.proxy_terms.clone(),
     }
 }
 
@@ -412,13 +427,15 @@ fn compile_swrl_rules(schema: &RawSchema) -> CompiledSwrlRules {
                     class: *class,
                     arg: convert_arg(arg),
                 },
-                RawSwrlAtom::PropertyAtom { property, subject, object } => {
-                    SwrlBodyAtom::PropertyAtom {
-                        property: *property,
-                        subject: convert_arg(subject),
-                        object: convert_arg(object),
-                    }
-                }
+                RawSwrlAtom::PropertyAtom {
+                    property,
+                    subject,
+                    object,
+                } => SwrlBodyAtom::PropertyAtom {
+                    property: *property,
+                    subject: convert_arg(subject),
+                    object: convert_arg(object),
+                },
                 RawSwrlAtom::SameIndividualAtom { left, right } => {
                     SwrlBodyAtom::SameIndividualAtom {
                         left: convert_arg(left),
@@ -442,13 +459,15 @@ fn compile_swrl_rules(schema: &RawSchema) -> CompiledSwrlRules {
                     class: *class,
                     arg: convert_arg(arg),
                 },
-                RawSwrlAtom::PropertyAtom { property, subject, object } => {
-                    SwrlHeadAtom::PropertyAtom {
-                        property: *property,
-                        subject: convert_arg(subject),
-                        object: convert_arg(object),
-                    }
-                }
+                RawSwrlAtom::PropertyAtom {
+                    property,
+                    subject,
+                    object,
+                } => SwrlHeadAtom::PropertyAtom {
+                    property: *property,
+                    subject: convert_arg(subject),
+                    object: convert_arg(object),
+                },
                 RawSwrlAtom::SameIndividualAtom { left, right } => {
                     SwrlHeadAtom::SameIndividualAtom {
                         left: convert_arg(left),
@@ -526,14 +545,14 @@ fn select_trigger(body: &[SwrlBodyAtom]) -> usize {
 fn atom_var_mask(atom: &SwrlBodyAtom) -> u64 {
     match atom {
         SwrlBodyAtom::ClassAtom { arg, .. } => arg.as_variable().map_or(0, |v| 1 << v),
-        SwrlBodyAtom::PropertyAtom { subject, object, .. } => {
-            subject.as_variable().map_or(0, |v| 1 << v)
-                | object.as_variable().map_or(0, |v| 1 << v)
+        SwrlBodyAtom::PropertyAtom {
+            subject, object, ..
+        } => {
+            subject.as_variable().map_or(0, |v| 1 << v) | object.as_variable().map_or(0, |v| 1 << v)
         }
         SwrlBodyAtom::SameIndividualAtom { left, right }
         | SwrlBodyAtom::DifferentIndividualsAtom { left, right } => {
-            left.as_variable().map_or(0, |v| 1 << v)
-                | right.as_variable().map_or(0, |v| 1 << v)
+            left.as_variable().map_or(0, |v| 1 << v) | right.as_variable().map_or(0, |v| 1 << v)
         }
     }
 }

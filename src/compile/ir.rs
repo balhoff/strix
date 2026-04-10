@@ -104,18 +104,44 @@ pub struct CompiledSwrlRule {
 
 #[derive(Clone, Debug)]
 pub enum SwrlBodyAtom {
-    ClassAtom { class: TermId, arg: SwrlArg },
-    PropertyAtom { property: TermId, subject: SwrlArg, object: SwrlArg },
-    SameIndividualAtom { left: SwrlArg, right: SwrlArg },
-    DifferentIndividualsAtom { left: SwrlArg, right: SwrlArg },
+    ClassAtom {
+        class: TermId,
+        arg: SwrlArg,
+    },
+    PropertyAtom {
+        property: TermId,
+        subject: SwrlArg,
+        object: SwrlArg,
+    },
+    SameIndividualAtom {
+        left: SwrlArg,
+        right: SwrlArg,
+    },
+    DifferentIndividualsAtom {
+        left: SwrlArg,
+        right: SwrlArg,
+    },
 }
 
 #[derive(Clone, Debug)]
 pub enum SwrlHeadAtom {
-    ClassAtom { class: TermId, arg: SwrlArg },
-    PropertyAtom { property: TermId, subject: SwrlArg, object: SwrlArg },
-    SameIndividualAtom { left: SwrlArg, right: SwrlArg },
-    DifferentIndividualsAtom { left: SwrlArg, right: SwrlArg },
+    ClassAtom {
+        class: TermId,
+        arg: SwrlArg,
+    },
+    PropertyAtom {
+        property: TermId,
+        subject: SwrlArg,
+        object: SwrlArg,
+    },
+    SameIndividualAtom {
+        left: SwrlArg,
+        right: SwrlArg,
+    },
+    DifferentIndividualsAtom {
+        left: SwrlArg,
+        right: SwrlArg,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

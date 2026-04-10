@@ -1,6 +1,6 @@
 mod parse;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::dict::{Dictionary, TermId};
 use crate::error::Result;
@@ -80,6 +80,15 @@ pub struct RawSchema {
     // SWRL rules
     pub swrl_rules: Vec<RawSwrlRule>,
 
+    // Proxy naming infrastructure (anonymous CE / ObjectInverseOf support)
+    pub proxy_counter: u32,
+    pub inverse_cache: BTreeMap<TermId, TermId>,
+    pub proxy_terms: BTreeSet<TermId>,
+
+    // ABox assertions from ontology (OFN/OWX format)
+    /// (subject, predicate, object) — ObjectPropertyAssertion / DataPropertyAssertion
+    pub extra_property_assertions: Vec<(TermId, TermId, TermId)>,
+
     // Negative assertions
     /// (property, subject, object) — NegativeObjectPropertyAssertion
     pub negative_object_property_assertions: Vec<(TermId, TermId, TermId)>,
@@ -135,10 +144,23 @@ pub struct RawSwrlRule {
 
 #[derive(Debug)]
 pub enum RawSwrlAtom {
-    ClassAtom { class: TermId, arg: RawSwrlArg },
-    PropertyAtom { property: TermId, subject: RawSwrlArg, object: RawSwrlArg },
-    SameIndividualAtom { left: RawSwrlArg, right: RawSwrlArg },
-    DifferentIndividualsAtom { left: RawSwrlArg, right: RawSwrlArg },
+    ClassAtom {
+        class: TermId,
+        arg: RawSwrlArg,
+    },
+    PropertyAtom {
+        property: TermId,
+        subject: RawSwrlArg,
+        object: RawSwrlArg,
+    },
+    SameIndividualAtom {
+        left: RawSwrlArg,
+        right: RawSwrlArg,
+    },
+    DifferentIndividualsAtom {
+        left: RawSwrlArg,
+        right: RawSwrlArg,
+    },
 }
 
 #[derive(Debug)]

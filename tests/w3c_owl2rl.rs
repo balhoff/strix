@@ -127,7 +127,11 @@ SubObjectPropertyOf(ObjectPropertyChain(:memberOf :locatedIn) :basedIn)
         ),
         "chain(memberOf, locatedIn) → basedIn should fire: {inferred}"
     );
-    assert_eq!(count_triples(&inferred), 1, "exactly one chain inference: {inferred}");
+    assert_eq!(
+        count_triples(&inferred),
+        1,
+        "exactly one chain inference: {inferred}"
+    );
 }
 
 /// Derived from W3C: New-Feature-ObjectPropertyChain-BJP-003
@@ -181,10 +185,15 @@ SubObjectPropertyOf(ObjectPropertyChain(:linksTo :extends) :linksTo)
 )",
     );
     assert!(
-        !inferred.contains("<http://example.org/a> <http://example.org/linksTo> <http://example.org/c>"),
+        !inferred
+            .contains("<http://example.org/a> <http://example.org/linksTo> <http://example.org/c>"),
         "chain(linksTo, extends)→linksTo must not fire on extends-only data: {inferred}"
     );
-    assert_eq!(count_triples(&inferred), 0, "no inferences from extends-only data: {inferred}");
+    assert_eq!(
+        count_triples(&inferred),
+        0,
+        "no inferences from extends-only data: {inferred}"
+    );
 }
 
 /// Derived from W3C: DisjointClasses-001
@@ -245,12 +254,15 @@ DisjointClasses(:Circle :Triangle :Square)
 /// Derived from W3C: New-Feature-DisjointObjectProperties-001
 ///
 /// DisjointObjectProperties(:above :below)
-/// :x :above :y . :x :below :z .
+/// :x :above :y . :x :below :z . DisjointProperties(:above, :below)
 /// ⊨ DifferentIndividuals(:y :z)
+///
+/// We verify the inferred differentness by also declaring SameIndividual(:y :z),
+/// which should produce a DifferentIndividuals inconsistency.
 #[test]
-#[ignore = "requires DifferentIndividuals inference from disjoint properties (production rule not yet implemented)"]
 fn w3c_disjoint_object_properties_001() {
-    let inferred = reason(
+    // Without SameIndividual: should succeed (no inconsistency)
+    let _inferred = reason(
         "\
 <http://example.org/x> <http://example.org/above> <http://example.org/y> .
 <http://example.org/x> <http://example.org/below> <http://example.org/z> .
@@ -264,8 +276,28 @@ Declaration(ObjectProperty(:below))
 DisjointObjectProperties(:above :below)
 )",
     );
-    // When differentFrom is implemented, verify y ≠ z
-    let _ = inferred;
+    // With SameIndividual(y,z): y≠z from disjoint props + y=z → inconsistency
+    let is_inconsistent = reason_expect_inconsistency(
+        "\
+<http://example.org/x> <http://example.org/above> <http://example.org/y> .
+<http://example.org/x> <http://example.org/below> <http://example.org/z> .
+",
+        "\
+Prefix(:=<http://example.org/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://example.org/ontology>
+Declaration(ObjectProperty(:above))
+Declaration(ObjectProperty(:below))
+Declaration(NamedIndividual(:y))
+Declaration(NamedIndividual(:z))
+DisjointObjectProperties(:above :below)
+SameIndividual(:y :z)
+)",
+    );
+    assert!(
+        is_inconsistent,
+        "DisjointProperties + SameIndividual should produce DifferentIndividuals inconsistency"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -498,7 +530,8 @@ FunctionalObjectProperty(:hasMother)
         "functional property should produce sameAs: {inferred}"
     );
     assert!(
-        inferred.contains("<http://example.org/beth>")&& inferred.contains("<http://example.org/elizabeth>"),
+        inferred.contains("<http://example.org/beth>")
+            && inferred.contains("<http://example.org/elizabeth>"),
         "both individuals should appear in sameAs: {inferred}"
     );
 }

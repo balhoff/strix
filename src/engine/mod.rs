@@ -144,14 +144,8 @@ impl TypeIndex {
     }
 
     fn insert(&mut self, instance: TermId, class: TermId) {
-        self.by_instance
-            .entry(instance)
-            .or_default()
-            .push(class);
-        self.by_class
-            .entry(class)
-            .or_default()
-            .push(instance);
+        self.by_instance.entry(instance).or_default().push(class);
+        self.by_class.entry(class).or_default().push(instance);
     }
 
     fn dedup(&mut self) {
@@ -179,10 +173,7 @@ impl TypeIndex {
 
     /// Instances of a given class (filtered to indexed classes).
     fn instances_of(&self, class: TermId) -> &[TermId] {
-        self.by_class
-            .get(&class)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+        self.by_class.get(&class).map(Vec::as_slice).unwrap_or(&[])
     }
 }
 
@@ -466,8 +457,14 @@ fn apply_swrl_type_rules(
             &mut bindings,
             ctx,
             &mut |bindings| {
-                let _ = emit_head(&rule.head, bindings, ctx.owl_same_as,
-                    sink.candidate_types, sink.candidate_properties, sink.different_pairs);
+                let _ = emit_head(
+                    &rule.head,
+                    bindings,
+                    ctx.owl_same_as,
+                    sink.candidate_types,
+                    sink.candidate_properties,
+                    sink.different_pairs,
+                );
             },
         );
     }
@@ -491,8 +488,11 @@ fn apply_swrl_property_rules(
         let rule = &schema.swrl_rules[rule_idx];
         let mut bindings = vec![None; rule.num_vars as usize];
 
-        if let SwrlBodyAtom::PropertyAtom { subject: s_arg, object: o_arg, .. } =
-            &rule.body[rule.trigger]
+        if let SwrlBodyAtom::PropertyAtom {
+            subject: s_arg,
+            object: o_arg,
+            ..
+        } = &rule.body[rule.trigger]
         {
             bind_arg(*s_arg, subject, &mut bindings);
             bind_arg(*o_arg, object, &mut bindings);
@@ -504,8 +504,14 @@ fn apply_swrl_property_rules(
             &mut bindings,
             ctx,
             &mut |bindings| {
-                let _ = emit_head(&rule.head, bindings, ctx.owl_same_as,
-                    sink.candidate_types, sink.candidate_properties, sink.different_pairs);
+                let _ = emit_head(
+                    &rule.head,
+                    bindings,
+                    ctx.owl_same_as,
+                    sink.candidate_types,
+                    sink.candidate_properties,
+                    sink.different_pairs,
+                );
             },
         );
     }
@@ -543,32 +549,39 @@ fn resolve_body(
     let atom = &all_atoms[atom_idx];
 
     match atom {
-        SwrlBodyAtom::ClassAtom { class, arg } => {
-            match resolve_arg(*arg, bindings) {
-                Some(instance) => {
-                    if ctx.indexes.types.has_type(instance, *class) {
-                        resolve_body(all_atoms, rest, bindings, ctx, callback);
-                    }
-                }
-                None => {
-                    let var = match arg {
-                        SwrlArg::Variable(v) => *v as usize,
-                        SwrlArg::Constant(_) => unreachable!(),
-                    };
-                    for &inst in ctx.indexes.types.instances_of(*class) {
-                        bindings[var] = Some(inst);
-                        resolve_body(all_atoms, rest, bindings, ctx, callback);
-                    }
-                    bindings[var] = None;
+        SwrlBodyAtom::ClassAtom { class, arg } => match resolve_arg(*arg, bindings) {
+            Some(instance) => {
+                if ctx.indexes.types.has_type(instance, *class) {
+                    resolve_body(all_atoms, rest, bindings, ctx, callback);
                 }
             }
-        }
-        SwrlBodyAtom::PropertyAtom { property, subject, object } => {
+            None => {
+                let var = match arg {
+                    SwrlArg::Variable(v) => *v as usize,
+                    SwrlArg::Constant(_) => unreachable!(),
+                };
+                for &inst in ctx.indexes.types.instances_of(*class) {
+                    bindings[var] = Some(inst);
+                    resolve_body(all_atoms, rest, bindings, ctx, callback);
+                }
+                bindings[var] = None;
+            }
+        },
+        SwrlBodyAtom::PropertyAtom {
+            property,
+            subject,
+            object,
+        } => {
             let s = resolve_arg(*subject, bindings);
             let o = resolve_arg(*object, bindings);
             match (s, o) {
                 (Some(sv), Some(ov)) => {
-                    if ctx.indexes.properties.objects_for(*property, sv).contains(&ov) {
+                    if ctx
+                        .indexes
+                        .properties
+                        .objects_for(*property, sv)
+                        .contains(&ov)
+                    {
                         resolve_body(all_atoms, rest, bindings, ctx, callback);
                     }
                 }
@@ -661,10 +674,15 @@ fn emit_head(
                 candidate_types.push((instance, *class))?;
             }
         }
-        SwrlHeadAtom::PropertyAtom { property, subject, object } => {
-            if let (Some(s), Some(o)) =
-                (resolve_arg(*subject, bindings), resolve_arg(*object, bindings))
-            {
+        SwrlHeadAtom::PropertyAtom {
+            property,
+            subject,
+            object,
+        } => {
+            if let (Some(s), Some(o)) = (
+                resolve_arg(*subject, bindings),
+                resolve_arg(*object, bindings),
+            ) {
                 candidate_properties.push((s, *property, o))?;
             }
         }
@@ -819,8 +837,7 @@ fn evaluate_equality_rules(
     if has_key {
         // Build class → instances reverse index for HasKey classes only.
         let mut class_to_instances: BTreeMap<TermId, Vec<TermId>> = BTreeMap::new();
-        let key_classes: BTreeSet<TermId> =
-            schema.has_key.iter().map(|(cls, _)| *cls).collect();
+        let key_classes: BTreeSet<TermId> = schema.has_key.iter().map(|(cls, _)| *cls).collect();
         for (&inst, classes) in &instance_classes {
             for &c in classes {
                 if key_classes.contains(&c) {
@@ -979,17 +996,64 @@ fn emit_sameas_triples(
     for members in classes.values() {
         for (i, &x) in members.iter().enumerate() {
             for &y in &members[i + 1..] {
-                store
-                    .derived_properties_mut()
-                    .push((x, owl_same_as, y))?;
-                store
-                    .derived_properties_mut()
-                    .push((y, owl_same_as, x))?;
+                store.derived_properties_mut().push((x, owl_same_as, y))?;
+                store.derived_properties_mut().push((y, owl_same_as, x))?;
                 count += 2;
             }
         }
     }
     Ok(count)
+}
+
+// ─── Post-fixpoint DifferentIndividuals from DisjointProperties ─────────────
+
+/// Infer DifferentIndividuals pairs from DisjointProperties axioms.
+///
+/// Rule: property(x, P, y) ∧ property(x, Q, z) ∧ DisjointProperties(P, Q) → y ≠ z
+///
+/// Runs post-fixpoint (DifferentIndividuals is negative — doesn't produce
+/// new type/property facts, only feeds into inconsistency checking).
+///
+/// Accepts the pre-built property assertions index to avoid a redundant
+/// full scan of `known_properties_iter()` (the same index is used by
+/// `check_disjoint_properties` in the inconsistency checker).
+pub fn infer_different_from_disjoint_properties(
+    prop_assertions: &BTreeMap<TermId, BTreeSet<(TermId, TermId)>>,
+    schema: &CompiledSchema,
+) -> Vec<(TermId, TermId)> {
+    if schema.disjoint_property_pairs.is_empty() {
+        return Vec::new();
+    }
+
+    // Re-index as pred → subject → [objects] for efficient cross-product
+    let mut by_pred_subj: BTreeMap<TermId, BTreeMap<TermId, Vec<TermId>>> = BTreeMap::new();
+    for (&pred, pairs) in prop_assertions {
+        let subj_map = by_pred_subj.entry(pred).or_default();
+        for &(s, o) in pairs {
+            subj_map.entry(s).or_default().push(o);
+        }
+    }
+
+    let mut pairs = Vec::new();
+    for &(pa, pb) in &schema.disjoint_property_pairs {
+        if let (Some(subjs_a), Some(subjs_b)) = (by_pred_subj.get(&pa), by_pred_subj.get(&pb)) {
+            for (s, objects_a) in subjs_a {
+                if let Some(objects_b) = subjs_b.get(s) {
+                    for &y in objects_a {
+                        for &z in objects_b {
+                            if y != z {
+                                pairs.push((y, z));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pairs.sort_unstable();
+    pairs.dedup();
+    pairs
 }
 
 // ─── Fixpoint loop ──────────────────────────────────────────────────────────
@@ -1051,8 +1115,7 @@ pub fn materialize(
             &mut swrl_state,
         )?;
 
-        let new_equalities =
-            evaluate_equality_rules(store, schema, &mut union_find, owl_same_as)?;
+        let new_equalities = evaluate_equality_rules(store, schema, &mut union_find, owl_same_as)?;
         if new_equalities == 0 {
             break;
         }
@@ -1080,7 +1143,11 @@ pub fn materialize(
     }
 
     stats.fixpoint_reached = true;
-    Ok(MaterializeResult { stats, union_find, swrl_different_pairs })
+    Ok(MaterializeResult {
+        stats,
+        union_find,
+        swrl_different_pairs,
+    })
 }
 
 /// SWRL-related state threaded through the inner fixpoint.
@@ -1168,7 +1235,8 @@ fn inner_fixpoint(
             }
             if has_swrl {
                 let mut sink = SwrlSink {
-                    candidate_types, candidate_properties,
+                    candidate_types,
+                    candidate_properties,
                     different_pairs: swrl_state.different_pairs,
                 };
                 apply_swrl_type_rules(instance, class, schema, &swrl_ctx, &mut sink)?;
@@ -1189,7 +1257,8 @@ fn inner_fixpoint(
             }
             if has_swrl {
                 let mut sink = SwrlSink {
-                    candidate_types, candidate_properties,
+                    candidate_types,
+                    candidate_properties,
                     different_pairs: swrl_state.different_pairs,
                 };
                 apply_swrl_property_rules(
@@ -1280,7 +1349,8 @@ fn inner_fixpoint(
             )?;
             if has_swrl {
                 let mut sink = SwrlSink {
-                    candidate_types, candidate_properties,
+                    candidate_types,
+                    candidate_properties,
                     different_pairs: swrl_state.different_pairs,
                 };
                 apply_swrl_type_rules(instance, class, schema, &swrl_ctx, &mut sink)?;
@@ -1341,7 +1411,8 @@ fn inner_fixpoint(
             )?;
             if has_swrl {
                 let mut sink = SwrlSink {
-                    candidate_types, candidate_properties,
+                    candidate_types,
+                    candidate_properties,
                     different_pairs: swrl_state.different_pairs,
                 };
                 apply_swrl_property_rules(
