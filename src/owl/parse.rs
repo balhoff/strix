@@ -1061,18 +1061,40 @@ fn encode_named_class(
     }
 }
 
+/// Return true if a CE in sub-class position would generate at least one schema entry.
+/// Mirrors the logic of `lower_anon_sub_named_super`: IntersectionOf is all-or-nothing
+/// (dropping a condition is unsound), UnionOf allows partial handling.
+fn is_useful_sub_ce(ce: &ClassExpression<RcStr>) -> bool {
+    match ce {
+        ClassExpression::Class(_) => true,
+        ClassExpression::ObjectIntersectionOf(conjuncts) => {
+            conjuncts.iter().all(is_useful_sub_ce)
+        }
+        ClassExpression::ObjectUnionOf(disjuncts) => disjuncts.iter().any(is_useful_sub_ce),
+        ClassExpression::ObjectSomeValuesFrom { bce, .. } => is_useful_sub_ce(bce),
+        ClassExpression::ObjectHasValue { i, .. } => matches!(i, Individual::Named(_)),
+        ClassExpression::ObjectOneOf(individuals) => {
+            individuals.iter().any(|i| matches!(i, Individual::Named(_)))
+        }
+        _ => false,
+    }
+}
+
 /// Return true if a CE in super-class position would generate at least one schema entry.
 /// Used to skip dead-end proxy creation in the both-anonymous SubClassOf arm.
+/// Mirrors the logic of `lower_named_sub_anon_super`, including recursive filler checks.
 fn is_useful_super_ce(ce: &ClassExpression<RcStr>) -> bool {
     match ce {
         ClassExpression::Class(_) => true,
         ClassExpression::ObjectIntersectionOf(conjuncts) => {
             conjuncts.iter().any(is_useful_super_ce)
         }
-        ClassExpression::ObjectAllValuesFrom { .. } => true,
-        ClassExpression::ObjectHasValue { .. } => true,
-        ClassExpression::ObjectMaxCardinality { n, .. } => *n <= 1,
-        ClassExpression::ObjectComplementOf(_) => true,
+        ClassExpression::ObjectAllValuesFrom { bce, .. } => is_useful_super_ce(bce),
+        ClassExpression::ObjectHasValue { i, .. } => matches!(i, Individual::Named(_)),
+        ClassExpression::ObjectMaxCardinality { n, bce, .. } => {
+            *n <= 1 && is_useful_sub_ce(bce)
+        }
+        ClassExpression::ObjectComplementOf(bce) => is_useful_sub_ce(bce),
         _ => false,
     }
 }
