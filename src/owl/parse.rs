@@ -398,12 +398,12 @@ fn absorb_ontology(
                 }
             }
 
-            // DisjointClasses
+            // DisjointClasses — members are sub class expressions; skip any that aren't
             Component::DisjointClasses(axiom) => {
                 let ids: Vec<TermId> = axiom
                     .0
                     .iter()
-                    .map(|ce| reify_as_sub(ce, dictionary, schema))
+                    .filter_map(|ce| reify_as_sub(ce, dictionary, schema))
                     .collect();
                 if ids.len() >= 2 {
                     schema.disjoint_classes.push(ids);
@@ -416,10 +416,10 @@ fn absorb_ontology(
                 let member_ids: Vec<TermId> = axiom
                     .1
                     .iter()
-                    .map(|ce| {
-                        let member = reify_as_sub(ce, dictionary, schema);
+                    .filter_map(|ce| {
+                        let member = reify_as_sub(ce, dictionary, schema)?;
                         schema.subclasses.insert((member, parent));
-                        member
+                        Some(member)
                     })
                     .collect();
                 if member_ids.len() >= 2 {
@@ -513,13 +513,15 @@ fn absorb_ontology(
             // Domain/Range
             Component::ObjectPropertyDomain(axiom) => {
                 let property = encode_object_property(&axiom.ope, dictionary, schema);
-                let class = reify_as_super(&axiom.ce, dictionary, schema);
-                schema.domains.insert((property, class));
+                if let Some(class) = reify_as_super(&axiom.ce, dictionary, schema) {
+                    schema.domains.insert((property, class));
+                }
             }
             Component::ObjectPropertyRange(axiom) => {
                 let property = encode_object_property(&axiom.ope, dictionary, schema);
-                let class = reify_as_super(&axiom.ce, dictionary, schema);
-                schema.ranges.insert((property, class));
+                if let Some(class) = reify_as_super(&axiom.ce, dictionary, schema) {
+                    schema.ranges.insert((property, class));
+                }
             }
 
             Component::SubDataPropertyOf(axiom) => {
@@ -536,8 +538,9 @@ fn absorb_ontology(
             }
             Component::DataPropertyDomain(axiom) => {
                 let property = dictionary.encode_iri(axiom.dp.as_ref());
-                let class = reify_as_super(&axiom.ce, dictionary, schema);
-                schema.domains.insert((property, class));
+                if let Some(class) = reify_as_super(&axiom.ce, dictionary, schema) {
+                    schema.domains.insert((property, class));
+                }
             }
             Component::FunctionalDataProperty(axiom) => {
                 let prop = dictionary.encode_iri(axiom.0.as_ref());
@@ -592,8 +595,9 @@ fn absorb_ontology(
             }
             Component::ClassAssertion(axiom) => {
                 if let Ok(ind_id) = encode_individual(&axiom.i, dictionary) {
-                    let class_id = reify_as_super(&axiom.ce, dictionary, schema);
-                    schema.one_of_types.push((ind_id, class_id));
+                    if let Some(class_id) = reify_as_super(&axiom.ce, dictionary, schema) {
+                        schema.one_of_types.push((ind_id, class_id));
+                    }
                 }
             }
             Component::ObjectPropertyAssertion(axiom) => {
@@ -640,22 +644,23 @@ fn absorb_ontology(
                     .insert("ReflexiveObjectProperty not yet implemented".to_string());
             }
             Component::HasKey(axiom) => {
-                let class = reify_as_sub(&axiom.ce, dictionary, schema);
-                let props: Vec<TermId> = axiom
-                    .vpe
-                    .iter()
-                    .filter_map(|pe| match pe {
-                        PropertyExpression::ObjectPropertyExpression(ope) => {
-                            Some(encode_object_property(ope, dictionary, schema))
-                        }
-                        PropertyExpression::DataProperty(dp) => {
-                            Some(dictionary.encode_iri(dp.as_ref()))
-                        }
-                        PropertyExpression::AnnotationProperty(_) => None,
-                    })
-                    .collect();
-                if !props.is_empty() {
-                    schema.has_key.push((class, props));
+                if let Some(class) = reify_as_sub(&axiom.ce, dictionary, schema) {
+                    let props: Vec<TermId> = axiom
+                        .vpe
+                        .iter()
+                        .filter_map(|pe| match pe {
+                            PropertyExpression::ObjectPropertyExpression(ope) => {
+                                Some(encode_object_property(ope, dictionary, schema))
+                            }
+                            PropertyExpression::DataProperty(dp) => {
+                                Some(dictionary.encode_iri(dp.as_ref()))
+                            }
+                            PropertyExpression::AnnotationProperty(_) => None,
+                        })
+                        .collect();
+                    if !props.is_empty() {
+                        schema.has_key.push((class, props));
+                    }
                 }
             }
             Component::Rule(axiom) => {
@@ -698,64 +703,89 @@ fn lower_subclass_of(
             lower_anon_sub_named_super(sub, sup_id, dictionary, schema);
         }
 
-        // Both anonymous — reify each side
+        // Both anonymous — precheck, reify sub, lower super directly (no super proxy)
         _ => {
-            let sub_id = reify_as_sub(sub, dictionary, schema);
-            let sup_id = reify_as_super(sup, dictionary, schema);
-            schema.subclasses.insert((sub_id, sup_id));
+            if !is_useful_super_ce(sup) {
+                return;
+            }
+            if let Some(sub_id) = reify_as_sub(sub, dictionary, schema) {
+                lower_named_sub_anon_super(sub_id, sup, dictionary, schema);
+            }
         }
     }
 }
 
 /// SubClassOf(Named(A), expr) — decompose the anonymous superclass.
+/// Returns true if at least one schema entry was generated.
 fn lower_named_sub_anon_super(
     sub_id: TermId,
     sup: &ClassExpression<RcStr>,
     dictionary: &mut Dictionary,
     schema: &mut RawSchema,
-) {
+) -> bool {
     match sup {
         ClassExpression::Class(c) => {
             let sup_id = dictionary.encode_iri(c.as_ref());
             schema.subclasses.insert((sub_id, sup_id));
+            true
         }
-        // A ⊆ C1 ∩ C2 ∩ ... → A ⊆ Ci for each
+        // A ⊆ C1 ∩ C2 ∩ ... → A ⊆ Ci for each (partial handling is sound)
         ClassExpression::ObjectIntersectionOf(conjuncts) => {
+            let mut any = false;
             for conjunct in conjuncts {
-                lower_named_sub_anon_super(sub_id, conjunct, dictionary, schema);
+                if lower_named_sub_anon_super(sub_id, conjunct, dictionary, schema) {
+                    any = true;
+                }
             }
+            any
         }
         // A ⊆ ∀P.B → allValuesFrom(A, P, B)
         ClassExpression::ObjectAllValuesFrom { ope, bce } => {
             let prop = encode_object_property(ope, dictionary, schema);
-            let filler = reify_as_super(bce, dictionary, schema);
-            schema.all_values_from.push((sub_id, prop, filler));
+            if let Some(filler) = reify_as_super(bce, dictionary, schema) {
+                schema.all_values_from.push((sub_id, prop, filler));
+                true
+            } else {
+                false
+            }
         }
         // A ⊆ ∃P.{v} → has_value_sub(A, P, v) (cls-hv2: type(x,A) → property(x,P,v))
         ClassExpression::ObjectHasValue { ope, i } => {
             let prop = encode_object_property(ope, dictionary, schema);
             if let Ok(val) = encode_individual(i, dictionary) {
                 schema.has_value_sub.push((sub_id, prop, val));
+                true
             } else {
                 schema
                     .unsupported
                     .insert("HasValue with anonymous individual".to_string());
+                false
             }
         }
-        // A ⊆ MaxCard(n, P, C)
+        // A ⊆ MaxCard(n, P, C) — skip entire rule if filler CE has no sub-position inference
         ClassExpression::ObjectMaxCardinality { n, ope, bce } => {
-            let prop = encode_object_property(ope, dictionary, schema);
-            let filler = Some(reify_as_sub(bce, dictionary, schema));
-            match n {
-                0 => schema.max_card_zero.push((sub_id, prop, filler)),
-                1 => schema.max_card_one.push((sub_id, prop, filler)),
-                _ => {} // MaxCard ≥ 2 has no RL inference
+            if *n > 1 {
+                return false; // MaxCard ≥ 2 has no RL inference
             }
+            let prop = encode_object_property(ope, dictionary, schema);
+            let Some(filler) = reify_as_sub(bce, dictionary, schema) else {
+                return false;
+            };
+            if *n == 0 {
+                schema.max_card_zero.push((sub_id, prop, Some(filler)));
+            } else {
+                schema.max_card_one.push((sub_id, prop, Some(filler)));
+            }
+            true
         }
         // A ⊆ ¬D → complementOf(A, D) for inconsistency detection
         ClassExpression::ObjectComplementOf(bce) => {
-            let comp = reify_as_sub(bce, dictionary, schema);
-            schema.complement_of.insert((sub_id, comp));
+            if let Some(comp) = reify_as_sub(bce, dictionary, schema) {
+                schema.complement_of.insert((sub_id, comp));
+                true
+            } else {
+                false
+            }
         }
         // Not useful for RL in this direction
         ClassExpression::ObjectSomeValuesFrom { .. }
@@ -763,60 +793,76 @@ fn lower_named_sub_anon_super(
         | ClassExpression::ObjectOneOf(_)
         | ClassExpression::ObjectHasSelf(_)
         | ClassExpression::ObjectMinCardinality { .. }
-        | ClassExpression::ObjectExactCardinality { .. } => {}
+        | ClassExpression::ObjectExactCardinality { .. } => false,
         // Data property restrictions deferred
         ClassExpression::DataSomeValuesFrom { .. }
         | ClassExpression::DataAllValuesFrom { .. }
         | ClassExpression::DataHasValue { .. }
         | ClassExpression::DataMinCardinality { .. }
         | ClassExpression::DataMaxCardinality { .. }
-        | ClassExpression::DataExactCardinality { .. } => {}
+        | ClassExpression::DataExactCardinality { .. } => false,
     }
 }
 
 /// SubClassOf(expr, Named(C)) — decompose the anonymous subclass.
+/// Returns true if at least one schema entry was generated.
 fn lower_anon_sub_named_super(
     sub: &ClassExpression<RcStr>,
     sup_id: TermId,
     dictionary: &mut Dictionary,
     schema: &mut RawSchema,
-) {
+) -> bool {
     match sub {
         ClassExpression::Class(c) => {
             let sub_id = dictionary.encode_iri(c.as_ref());
             schema.subclasses.insert((sub_id, sup_id));
+            true
         }
         // C1 ∩ C2 ∩ ... ⊆ C → intersectionOf(C, [C1,...])
+        // All-or-nothing: dropping any condition is unsound (would fire the rule too broadly)
         ClassExpression::ObjectIntersectionOf(conjuncts) => {
             let conjunct_ids: Vec<TermId> = conjuncts
                 .iter()
-                .map(|ce| reify_as_sub(ce, dictionary, schema))
+                .filter_map(|ce| reify_as_sub(ce, dictionary, schema))
                 .collect();
-            if conjunct_ids.len() >= 2 {
+            if conjunct_ids.len() == conjuncts.len() && conjunct_ids.len() >= 2 {
                 schema.intersection_of.push((sup_id, conjunct_ids));
+                true
+            } else {
+                false
             }
         }
-        // C1 ∪ C2 ∪ ... ⊆ C → SubClassOf(Ci, C) for each
+        // C1 ∪ C2 ∪ ... ⊆ C → SubClassOf(Ci, C) for each (partial handling is sound)
         ClassExpression::ObjectUnionOf(disjuncts) => {
+            let mut any = false;
             for disjunct in disjuncts {
-                lower_anon_sub_named_super(disjunct, sup_id, dictionary, schema);
+                if lower_anon_sub_named_super(disjunct, sup_id, dictionary, schema) {
+                    any = true;
+                }
             }
+            any
         }
         // ∃P.D ⊆ C → someValuesFrom(C, P, D)
         ClassExpression::ObjectSomeValuesFrom { ope, bce } => {
             let prop = encode_object_property(ope, dictionary, schema);
-            let filler = reify_as_sub(bce, dictionary, schema);
-            schema.some_values_from.push((sup_id, prop, filler));
+            if let Some(filler) = reify_as_sub(bce, dictionary, schema) {
+                schema.some_values_from.push((sup_id, prop, filler));
+                true
+            } else {
+                false
+            }
         }
         // ∃P.{v} ⊆ C → has_value_super(C, P, v) (cls-hv1: property(x,P,v) → type(x,C))
         ClassExpression::ObjectHasValue { ope, i } => {
             let prop = encode_object_property(ope, dictionary, schema);
             if let Ok(val) = encode_individual(i, dictionary) {
                 schema.has_value_super.push((sup_id, prop, val));
+                true
             } else {
                 schema
                     .unsupported
                     .insert("HasValue with anonymous individual".to_string());
+                false
             }
         }
         // {a1,...,an} ⊆ C → type(ai, C) for each named individual
@@ -833,6 +879,7 @@ fn lower_anon_sub_named_super(
                     .unsupported
                     .insert("ObjectOneOf with only anonymous individuals".to_string());
             }
+            any_encoded
         }
         // Not useful for RL in this direction
         ClassExpression::ObjectAllValuesFrom { .. }
@@ -840,14 +887,14 @@ fn lower_anon_sub_named_super(
         | ClassExpression::ObjectHasSelf(_)
         | ClassExpression::ObjectMinCardinality { .. }
         | ClassExpression::ObjectMaxCardinality { .. }
-        | ClassExpression::ObjectExactCardinality { .. } => {}
+        | ClassExpression::ObjectExactCardinality { .. } => false,
         // Data property restrictions deferred
         ClassExpression::DataSomeValuesFrom { .. }
         | ClassExpression::DataAllValuesFrom { .. }
         | ClassExpression::DataHasValue { .. }
         | ClassExpression::DataMinCardinality { .. }
         | ClassExpression::DataMaxCardinality { .. }
-        | ClassExpression::DataExactCardinality { .. } => {}
+        | ClassExpression::DataExactCardinality { .. } => false,
     }
 }
 
@@ -889,9 +936,17 @@ fn serialize_triples_to_ntriples(triples: &[Triple]) -> Vec<u8> {
     output
 }
 
-fn fresh_proxy_term(schema: &mut RawSchema, dictionary: &mut Dictionary) -> TermId {
+/// Allocate a proxy IRI, incrementing the counter and encoding the IRI in the
+/// dictionary, but WITHOUT registering it in `proxy_terms`. Use this when the
+/// proxy may turn out to be a dead-end (no schema entries generated from it).
+/// Call `schema.proxy_terms.insert(id)` separately once the proxy is confirmed useful.
+fn alloc_proxy_iri(schema: &mut RawSchema, dictionary: &mut Dictionary) -> TermId {
     schema.proxy_counter += 1;
-    let id = dictionary.encode_iri(&format!("urn:strix:anon:{}", schema.proxy_counter));
+    dictionary.encode_iri(&format!("urn:strix:anon:{}", schema.proxy_counter))
+}
+
+fn fresh_proxy_term(schema: &mut RawSchema, dictionary: &mut Dictionary) -> TermId {
+    let id = alloc_proxy_iri(schema, dictionary);
     schema.proxy_terms.insert(id);
     id
 }
@@ -1006,48 +1061,72 @@ fn encode_named_class(
     }
 }
 
-/// Reify a CE in super-class position: returns a TermId.
-/// Named CEs return their TermId directly (no proxy).
-/// Anonymous CEs get a fresh proxy C with SubClassOf(C, CE) axioms.
-/// The same anonymous CE always maps to the same proxy (structural deduplication).
+/// Return true if a CE in super-class position would generate at least one schema entry.
+/// Used to skip dead-end proxy creation in the both-anonymous SubClassOf arm.
+fn is_useful_super_ce(ce: &ClassExpression<RcStr>) -> bool {
+    match ce {
+        ClassExpression::Class(_) => true,
+        ClassExpression::ObjectIntersectionOf(conjuncts) => {
+            conjuncts.iter().any(is_useful_super_ce)
+        }
+        ClassExpression::ObjectAllValuesFrom { .. } => true,
+        ClassExpression::ObjectHasValue { .. } => true,
+        ClassExpression::ObjectMaxCardinality { n, .. } => *n <= 1,
+        ClassExpression::ObjectComplementOf(_) => true,
+        _ => false,
+    }
+}
+
+/// Reify a CE in super-class position: returns Some(TermId) if useful, None if the CE
+/// generates no schema entries (dead-end). Named CEs return their TermId directly.
+/// Anonymous CEs get a fresh proxy C with SubClassOf(C, CE) axioms, but only when
+/// at least one schema entry is generated. The same CE always maps to the same proxy.
 fn reify_as_super(
     ce: &ClassExpression<RcStr>,
     dictionary: &mut Dictionary,
     schema: &mut RawSchema,
-) -> TermId {
+) -> Option<TermId> {
     if let Ok(id) = encode_named_class(ce, dictionary) {
-        return id;
+        return Some(id);
     }
     if let Some(&existing) = schema.super_proxy_cache.get(ce) {
-        return existing;
+        return Some(existing);
     }
-    let proxy = fresh_proxy_term(schema, dictionary);
+    let proxy = alloc_proxy_iri(schema, dictionary);
+    let useful = lower_named_sub_anon_super(proxy, ce, dictionary, schema);
+    if !useful {
+        return None;
+    }
+    schema.proxy_terms.insert(proxy);
     schema.super_proxy_cache.insert(ce.clone(), proxy);
     schema.proxy_display.insert(proxy, format_ce(ce));
-    lower_named_sub_anon_super(proxy, ce, dictionary, schema);
-    proxy
+    Some(proxy)
 }
 
-/// Reify a CE in sub-class position: returns a TermId.
-/// Named CEs return their TermId directly (no proxy).
-/// Anonymous CEs get a fresh proxy C with SubClassOf(CE, C) axioms.
-/// The same anonymous CE always maps to the same proxy (structural deduplication).
+/// Reify a CE in sub-class position: returns Some(TermId) if useful, None if the CE
+/// generates no schema entries (dead-end). Named CEs return their TermId directly.
+/// Anonymous CEs get a fresh proxy C with SubClassOf(CE, C) axioms, but only when
+/// at least one schema entry is generated. The same CE always maps to the same proxy.
 fn reify_as_sub(
     ce: &ClassExpression<RcStr>,
     dictionary: &mut Dictionary,
     schema: &mut RawSchema,
-) -> TermId {
+) -> Option<TermId> {
     if let Ok(id) = encode_named_class(ce, dictionary) {
-        return id;
+        return Some(id);
     }
     if let Some(&existing) = schema.sub_proxy_cache.get(ce) {
-        return existing;
+        return Some(existing);
     }
-    let proxy = fresh_proxy_term(schema, dictionary);
+    let proxy = alloc_proxy_iri(schema, dictionary);
+    let useful = lower_anon_sub_named_super(ce, proxy, dictionary, schema);
+    if !useful {
+        return None;
+    }
+    schema.proxy_terms.insert(proxy);
     schema.sub_proxy_cache.insert(ce.clone(), proxy);
     schema.proxy_display.insert(proxy, format_ce(ce));
-    lower_anon_sub_named_super(ce, proxy, dictionary, schema);
-    proxy
+    Some(proxy)
 }
 
 fn encode_horned_literal(lit: &Literal<RcStr>) -> RdfTerm {
@@ -1129,8 +1208,16 @@ fn convert_swrl_atom(
             } else {
                 reify_as_sub(pred, dictionary, schema)
             };
-            let arg = convert_iargument(arg, dictionary)?;
-            Ok(RawSwrlAtom::ClassAtom { class, arg })
+            match class {
+                Some(class) => {
+                    let arg = convert_iargument(arg, dictionary)?;
+                    Ok(RawSwrlAtom::ClassAtom { class, arg })
+                }
+                None => Err(format!(
+                    "SWRL ClassAtom with unsupported CE: {}",
+                    format_ce(pred)
+                )),
+            }
         }
         Atom::ObjectPropertyAtom { pred, args } => {
             let property = encode_object_property(pred, dictionary, schema);
