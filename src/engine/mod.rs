@@ -5,13 +5,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::compile::CompiledSchema;
 use crate::compile::ir::{SwrlArg, SwrlBodyAtom, SwrlHeadAtom};
-use crate::dict::TermId;
+use crate::dict::{Dictionary, TermId};
 use crate::error::Result;
+use crate::rdf::Term;
 use crate::store::FactStore;
 use crate::store::delta::difference_streaming_into;
 use crate::store::merge::{MergeBinaryIter, MergeTernaryIter};
 use crate::store::relation::{BinaryRelation, TernaryRelation};
 
+use inconsistency::Inconsistency;
 pub use sameas::UnionFind;
 
 #[derive(Clone, Debug, Default)]
@@ -35,6 +37,8 @@ pub struct MaterializeResult {
     pub union_find: UnionFind,
     /// DifferentIndividuals pairs inferred by SWRL DifferentIndividualsAtom heads.
     pub swrl_different_pairs: Vec<(TermId, TermId)>,
+    /// Inconsistencies detected during equality reasoning (e.g. LiteralConflict).
+    pub literal_conflicts: Vec<Inconsistency>,
 }
 
 // ─── In-memory index for join-requiring rules ───────────────────────────────
@@ -715,13 +719,21 @@ use std::collections::HashMap;
 ///   - FunctionalProperty: multiple objects for same (pred, subject) → union
 ///   - InverseFunctionalProperty: multiple subjects for same (pred, object) → union
 ///   - MaxCardinality 1: type(x,A) ∧ property(x,P,y1) ∧ property(x,P,y2) [∧ type checks] → union
+///
+/// Returns `(new_equalities, literal_conflicts)`. Literal conflicts are pairs
+/// of distinct literal TermIds that equality rules tried to merge — these are
+/// inconsistencies because literal identity is fixed.
 fn evaluate_equality_rules(
     store: &mut FactStore,
     schema: &CompiledSchema,
     union_find: &mut UnionFind,
     owl_same_as: TermId,
-) -> Result<usize> {
+    dictionary: &Dictionary,
+) -> Result<(usize, Vec<Inconsistency>)> {
     let mut new_equalities = 0usize;
+    let mut literal_conflicts: Vec<Inconsistency> = Vec::new();
+
+    let is_literal = |id: TermId| matches!(dictionary.decode(id), Some(Term::Literal(_)));
 
     let has_fp = !schema.functional_properties.is_empty();
     let has_ifp = !schema.inverse_functional_properties.is_empty();
@@ -736,7 +748,7 @@ fn evaluate_equality_rules(
                 new_equalities += 1;
             }
         }
-        return Ok(new_equalities);
+        return Ok((new_equalities, literal_conflicts));
     }
 
     // Build instance → classes map for max_card_one and has_key (need type membership).
@@ -788,17 +800,21 @@ fn evaluate_equality_rules(
         }
     }
 
-    // FunctionalProperty: union multiple objects for same (pred, subject)
-    for objects in fp_groups.values() {
-        new_equalities += union_find.union_all(objects);
+    // FunctionalProperty: union multiple objects for same (pred, subject).
+    // Literals cannot be merged — distinct literals are an inconsistency.
+    for (&(pred, subj), objects) in &fp_groups {
+        new_equalities +=
+            union_all_checking_literals(subj, pred, objects, union_find, &is_literal, &mut literal_conflicts);
     }
 
-    // InverseFunctionalProperty: union multiple subjects for same (pred, object)
+    // InverseFunctionalProperty: union multiple subjects for same (pred, object).
+    // Subjects are always individuals, never literals.
     for subjects in ifp_groups.values() {
         new_equalities += union_find.union_all(subjects);
     }
 
-    // MaxCardinality 1: for each (subject, pred) group, check matching axioms via index
+    // MaxCardinality 1: for each (subject, pred) group, check matching axioms via index.
+    // Objects may be literals for data properties.
     for (&(subj, pred), objects) in &mc1_groups {
         if objects.len() <= 1 {
             continue;
@@ -827,7 +843,14 @@ fn evaluate_equality_rules(
                 } else {
                     objects.clone()
                 };
-                new_equalities += union_find.union_all(&qualifying);
+                new_equalities += union_all_checking_literals(
+                    subj,
+                    pred,
+                    &qualifying,
+                    union_find,
+                    &is_literal,
+                    &mut literal_conflicts,
+                );
             }
         }
     }
@@ -906,7 +929,49 @@ fn evaluate_equality_rules(
         }
     }
 
-    Ok(new_equalities)
+    Ok((new_equalities, literal_conflicts))
+}
+
+/// Merge items via union-find, but skip merges between distinct literals.
+/// Distinct-literal pairs are recorded as `LiteralConflict` inconsistencies
+/// with the individual and property that caused the attempted merge.
+fn union_all_checking_literals(
+    individual: TermId,
+    property: TermId,
+    items: &[TermId],
+    union_find: &mut UnionFind,
+    is_literal: &impl Fn(TermId) -> bool,
+    conflicts: &mut Vec<Inconsistency>,
+) -> usize {
+    if items.len() <= 1 {
+        return 0;
+    }
+    // Partition into literals and non-literals.
+    let mut literals = Vec::new();
+    let mut non_literals = Vec::new();
+    for &item in items {
+        if is_literal(item) {
+            literals.push(item);
+        } else {
+            non_literals.push(item);
+        }
+    }
+    let count = union_find.union_all(&non_literals);
+    // Distinct literals in the same merge group → inconsistency.
+    if literals.len() >= 2 {
+        let mut deduped: Vec<TermId> = literals.iter().map(|&l| union_find.canonical(l)).collect();
+        deduped.sort_unstable();
+        deduped.dedup();
+        if deduped.len() >= 2 {
+            conflicts.push(Inconsistency::LiteralConflict {
+                individual,
+                property,
+                literal_a: deduped[0],
+                literal_b: deduped[1],
+            });
+        }
+    }
+    count
 }
 
 /// Generate candidate facts by expanding existing facts across all members
@@ -1064,6 +1129,7 @@ pub fn materialize(
     max_iterations: Option<usize>,
     engine_budget: usize,
     owl_same_as: TermId,
+    dictionary: &Dictionary,
 ) -> Result<MaterializeResult> {
     let mut stats = ReasoningStats::default();
     let relation_budget = engine_budget / 4;
@@ -1094,6 +1160,7 @@ pub fn materialize(
     }
 
     let mut swrl_different_pairs: Vec<(TermId, TermId)> = Vec::new();
+    let mut literal_conflicts: Vec<Inconsistency> = Vec::new();
 
     // Outer equality fixpoint: run inner fixpoint, check for new equalities
     // (from FunctionalProperty, InverseFunctionalProperty, MaxCardinality 1,
@@ -1115,7 +1182,9 @@ pub fn materialize(
             &mut swrl_state,
         )?;
 
-        let new_equalities = evaluate_equality_rules(store, schema, &mut union_find, owl_same_as)?;
+        let (new_equalities, lit_conflicts) =
+            evaluate_equality_rules(store, schema, &mut union_find, owl_same_as, dictionary)?;
+        literal_conflicts.extend(lit_conflicts);
         if new_equalities == 0 {
             break;
         }
@@ -1147,6 +1216,7 @@ pub fn materialize(
         stats,
         union_find,
         swrl_different_pairs,
+        literal_conflicts,
     })
 }
 

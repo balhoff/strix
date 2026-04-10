@@ -2,7 +2,7 @@ mod parse;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use horned_owl::model::{ClassExpression, RcStr};
+use horned_owl::model::{ClassExpression, DataRange, RcStr};
 
 use crate::dict::{Dictionary, TermId};
 use crate::error::Result;
@@ -24,6 +24,7 @@ pub const OWL_DATATYPE_PROPERTY_IRI: &str = "http://www.w3.org/2002/07/owl#Datat
 pub const OWL_SAME_AS_IRI: &str = "http://www.w3.org/2002/07/owl#sameAs";
 pub const OWL_THING_IRI: &str = "http://www.w3.org/2002/07/owl#Thing";
 pub const OWL_NOTHING_IRI: &str = "http://www.w3.org/2002/07/owl#Nothing";
+pub const RDFS_LITERAL_IRI: &str = "http://www.w3.org/2000/01/rdf-schema#Literal";
 pub const XSD_STRING_IRI: &str = "http://www.w3.org/2001/XMLSchema#string";
 pub const RDF_LANG_STRING_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
 
@@ -87,6 +88,7 @@ pub struct RawSchema {
     pub inverse_cache: BTreeMap<TermId, TermId>,
     pub sub_proxy_cache: BTreeMap<ClassExpression<RcStr>, TermId>,
     pub super_proxy_cache: BTreeMap<ClassExpression<RcStr>, TermId>,
+    pub data_range_cache: BTreeMap<DataRange<RcStr>, TermId>,
     pub proxy_terms: BTreeSet<TermId>,
     /// Human-readable OFN display string for each proxy TermId.
     pub proxy_display: BTreeMap<TermId, String>,
@@ -94,6 +96,15 @@ pub struct RawSchema {
     // ABox assertions from ontology (OFN/OWX format)
     /// (subject, predicate, object) — ObjectPropertyAssertion / DataPropertyAssertion
     pub extra_property_assertions: Vec<(TermId, TermId, TermId)>,
+
+    /// (literal_term, datatype_term) — type(literal, datatype) from DataPropertyAssertion
+    pub literal_datatype_types: Vec<(TermId, TermId)>,
+
+    /// True if the schema uses data range restrictions (DataSomeValuesFrom,
+    /// DataAllValuesFrom, DataPropertyRange with a datatype, DataMaxCardinality,
+    /// or DataHasValue). When false, literal-to-datatype type assertions can
+    /// be skipped to avoid unnecessary overhead in the reasoning loop.
+    pub has_data_range_restrictions: bool,
 
     // Negative assertions
     /// (property, subject, object) — NegativeObjectPropertyAssertion
@@ -196,14 +207,27 @@ pub fn ingest_data_triple(
     dictionary: &mut Dictionary,
     extracted_schema: &mut ExtractedSchema,
     store: &mut FactStore,
+    literal_types: &mut Vec<(TermId, TermId)>,
 ) -> Result<()> {
     if extract_schema && should_extract_schema_axiom(&triple) {
         extracted_schema.push(triple);
         return Ok(());
     }
 
+    // Collect literal-datatype pairs for deferred injection. These are only
+    // inserted into the store later if the schema uses data range restrictions.
+    let literal_datatype = if let Term::Literal(ref lit) = triple.object {
+        lit.datatype.as_deref().map(|dt| dictionary.encode_iri(dt))
+    } else {
+        None
+    };
+
     let subject = dictionary.encode(triple.subject);
     let object = dictionary.encode(triple.object);
+
+    if let Some(datatype_id) = literal_datatype {
+        literal_types.push((object, datatype_id));
+    }
     if triple.predicate == RDF_TYPE_IRI {
         store.insert_asserted_type(subject, object)?;
         return Ok(());

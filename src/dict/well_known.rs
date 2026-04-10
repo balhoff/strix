@@ -1,7 +1,8 @@
 use crate::owl::{
     OWL_CLASS_IRI, OWL_DATATYPE_PROPERTY_IRI, OWL_NOTHING_IRI, OWL_OBJECT_PROPERTY_IRI,
-    OWL_SAME_AS_IRI, OWL_THING_IRI, RDF_PROPERTY_IRI, RDF_TYPE_IRI, RDFS_CLASS_IRI,
-    RDFS_DOMAIN_IRI, RDFS_RANGE_IRI, RDFS_SUBCLASS_OF_IRI, RDFS_SUBPROPERTY_OF_IRI,
+    OWL_SAME_AS_IRI, OWL_THING_IRI, RDFS_LITERAL_IRI, RDF_PROPERTY_IRI, RDF_TYPE_IRI,
+    RDFS_CLASS_IRI, RDFS_DOMAIN_IRI, RDFS_RANGE_IRI, RDFS_SUBCLASS_OF_IRI,
+    RDFS_SUBPROPERTY_OF_IRI,
 };
 
 use super::{Dictionary, TermId};
@@ -21,6 +22,7 @@ pub struct WellKnown {
     pub owl_same_as: TermId,
     pub owl_thing: TermId,
     pub owl_nothing: TermId,
+    pub rdfs_literal: TermId,
 }
 
 impl WellKnown {
@@ -39,6 +41,7 @@ impl WellKnown {
             owl_same_as: dictionary.encode_iri(OWL_SAME_AS_IRI),
             owl_thing: dictionary.encode_iri(OWL_THING_IRI),
             owl_nothing: dictionary.encode_iri(OWL_NOTHING_IRI),
+            rdfs_literal: dictionary.encode_iri(RDFS_LITERAL_IRI),
         }
     }
 }

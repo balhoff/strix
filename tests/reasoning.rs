@@ -3440,34 +3440,24 @@ fn swrl_multi_atom_rule_parses() {
 }
 
 #[test]
-fn swrl_data_property_atom_flagged_unsupported() {
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let report_path = temp_dir.path().join("report.json");
-
-    let _inferred = reason_with_report(
-        "<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/A> .\n",
+fn swrl_data_property_atom_fires() {
+    let inferred = reason(
+        "<http://example.com/alice> <http://example.com/dp> \"hello\" .\n",
         "Prefix(:=<http://example.com/>)\n\
          Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)\n\
          Ontology(\n\
+           Declaration(Class(:B))\n\
+           Declaration(DataProperty(:dp))\n\
            DLSafeRule(\n\
              Body(DataPropertyAtom(:dp Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#v>)))\n\
              Head(ClassAtom(:B Variable(<urn:swrl:var#x>)))\n\
            )\n\
          )",
-        &report_path,
-        &[],
     );
 
-    let report: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
-    let unsupported = report["rules"]["unsupported_encountered"]
-        .as_array()
-        .unwrap();
     assert!(
-        unsupported
-            .iter()
-            .any(|v| v.as_str().unwrap().contains("DataPropertyAtom")),
-        "SWRL DataPropertyAtom should be flagged unsupported: {unsupported:?}"
+        inferred.contains("<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/B>"),
+        "SWRL DataPropertyAtom should fire and infer type: {inferred}"
     );
 }
 
@@ -4351,6 +4341,248 @@ fn write(path: &Path, content: &str) {
 }
 
 /// Count non-empty lines in an N-Triples file (each line = one triple).
+// ─── Data property restriction tests ─────────────────────────────────
+
+#[test]
+fn data_has_value_sub_position() {
+    // A ⊆ DataHasValue(dp, "42"^^xsd:integer) → type(x, A) → property(x, dp, "42")
+    let inferred = reason(
+        "<http://example.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/A> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)\n\
+         Ontology(\n\
+           Declaration(Class(:A))\n\
+           Declaration(DataProperty(:dp))\n\
+           SubClassOf(:A DataHasValue(:dp \"42\"^^xsd:integer))\n\
+         )",
+    );
+
+    assert!(
+        inferred.contains("<http://example.com/dp>"),
+        "DataHasValue in sub should produce property assertion: {inferred}"
+    );
+}
+
+#[test]
+fn data_has_value_super_position() {
+    // DataHasValue(dp, "42") ⊆ A → property(x, dp, "42") → type(x, A)
+    let inferred = reason(
+        "<http://example.com/x> <http://example.com/dp> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)\n\
+         Ontology(\n\
+           Declaration(Class(:A))\n\
+           Declaration(DataProperty(:dp))\n\
+           SubClassOf(DataHasValue(:dp \"42\"^^xsd:integer) :A)\n\
+         )",
+    );
+
+    assert!(
+        inferred.contains("<http://example.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/A>"),
+        "DataHasValue in super should infer type: {inferred}"
+    );
+}
+
+#[test]
+fn data_some_values_from_named_datatype() {
+    // DataSomeValuesFrom(dp, xsd:integer) ⊆ A
+    // property(x, dp, v) ∧ type(v, xsd:integer) → type(x, A)
+    let inferred = reason(
+        "<http://example.com/x> <http://example.com/dp> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)\n\
+         Ontology(\n\
+           Declaration(Class(:A))\n\
+           Declaration(DataProperty(:dp))\n\
+           SubClassOf(DataSomeValuesFrom(:dp xsd:integer) :A)\n\
+         )",
+    );
+
+    assert!(
+        inferred.contains("<http://example.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/A>"),
+        "DataSomeValuesFrom should infer type from typed literal: {inferred}"
+    );
+}
+
+#[test]
+fn data_some_values_from_wrong_datatype_no_match() {
+    // DataSomeValuesFrom(dp, xsd:string) ⊆ A — literal is xsd:integer, should not match
+    let inferred = reason(
+        "<http://example.com/x> <http://example.com/dp> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)\n\
+         Ontology(\n\
+           Declaration(Class(:A))\n\
+           Declaration(DataProperty(:dp))\n\
+           SubClassOf(DataSomeValuesFrom(:dp xsd:string) :A)\n\
+         )",
+    );
+
+    assert!(
+        !inferred.contains("<http://example.com/A>"),
+        "DataSomeValuesFrom with wrong datatype should not fire: {inferred}"
+    );
+}
+
+#[test]
+fn data_all_values_from_named_datatype() {
+    // A ⊆ DataAllValuesFrom(dp, MyType), DataSomeValuesFrom(dp, MyType) ⊆ B
+    // type(x, A) ∧ property(x, dp, v) → type(v, MyType) → someValuesFrom fires → type(x, B)
+    let inferred = reason(
+        "<http://example.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/A> .\n\
+         <http://example.com/x> <http://example.com/dp> \"hello\" .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)\n\
+         Ontology(\n\
+           Declaration(Class(:A))\n\
+           Declaration(Class(:B))\n\
+           Declaration(DataProperty(:dp))\n\
+           SubClassOf(:A DataAllValuesFrom(:dp :MyType))\n\
+           SubClassOf(DataSomeValuesFrom(:dp :MyType) :B)\n\
+         )",
+    );
+
+    assert!(
+        inferred.contains("<http://example.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/B>"),
+        "DataAllValuesFrom should infer datatype and feed DataSomeValuesFrom: {inferred}"
+    );
+}
+
+#[test]
+fn data_property_range() {
+    // DataPropertyRange(dp, MyType) + DataSomeValuesFrom(dp, MyType) ⊆ A
+    // property(x, dp, v) → type(v, MyType) via range → someValuesFrom fires → type(x, A)
+    let inferred = reason(
+        "<http://example.com/x> <http://example.com/dp> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)\n\
+         Ontology(\n\
+           Declaration(Class(:A))\n\
+           Declaration(DataProperty(:dp))\n\
+           DataPropertyRange(:dp :MyType)\n\
+           SubClassOf(DataSomeValuesFrom(:dp :MyType) :A)\n\
+         )",
+    );
+
+    // The range rule infers type(v, MyType), then someValuesFrom fires → type(x, A)
+    assert!(
+        inferred.contains("<http://example.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/A>"),
+        "DataPropertyRange should feed into DataSomeValuesFrom: {inferred}"
+    );
+}
+
+#[test]
+fn data_property_range_fires_domain() {
+    // DataPropertyRange(dp, xsd:integer) + DataPropertyDomain(dp, A)
+    // property(x, dp, v) → type(x, A) via domain
+    let inferred = reason(
+        "<http://example.com/x> <http://example.com/dp> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)\n\
+         Ontology(\n\
+           Declaration(Class(:A))\n\
+           Declaration(DataProperty(:dp))\n\
+           DataPropertyDomain(:dp :A)\n\
+           DataPropertyRange(:dp xsd:integer)\n\
+         )",
+    );
+
+    assert!(
+        inferred.contains("<http://example.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/A>"),
+        "DataPropertyDomain should infer type for subject: {inferred}"
+    );
+}
+
+#[test]
+fn disjoint_data_properties() {
+    // DisjointDataProperties(dp1, dp2) → sharing subject+object is inconsistent
+    let (_, report) = reason_check_inconsistency(
+        "<http://example.com/x> <http://example.com/dp1> \"hello\" .\n\
+         <http://example.com/x> <http://example.com/dp2> \"hello\" .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Ontology(\n\
+           Declaration(DataProperty(:dp1))\n\
+           Declaration(DataProperty(:dp2))\n\
+           DisjointDataProperties(:dp1 :dp2)\n\
+         )",
+    );
+
+    assert!(
+        report.contains("DisjointProperties"),
+        "DisjointDataProperties should produce inconsistency: {report}"
+    );
+}
+
+#[test]
+fn data_max_cardinality_zero() {
+    // A ⊆ DataMaxCardinality(0, dp) → type(x, A) ∧ property(x, dp, v) → inconsistency
+    let (_, report) = reason_check_inconsistency(
+        "<http://example.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/A> .\n\
+         <http://example.com/x> <http://example.com/dp> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)\n\
+         Ontology(\n\
+           Declaration(Class(:A))\n\
+           Declaration(DataProperty(:dp))\n\
+           SubClassOf(:A DataMaxCardinality(0 :dp))\n\
+         )",
+    );
+
+    assert!(
+        report.contains("MaxCardinality"),
+        "DataMaxCardinality(0) violation should be detected: {report}"
+    );
+}
+
+#[test]
+fn data_max_cardinality_one_literal_conflict() {
+    // DataMaxCardinality(1, dp) with two distinct literal values should
+    // produce a LiteralConflict inconsistency (literals have fixed identity
+    // and cannot be merged via sameAs).
+    let (_inferred, report) = reason_check_inconsistency(
+        "<http://example.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/A> .\n\
+         <http://example.com/x> <http://example.com/dp> \"hello\" .\n\
+         <http://example.com/x> <http://example.com/dp> \"world\" .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Ontology(\n\
+           Declaration(Class(:A))\n\
+           Declaration(DataProperty(:dp))\n\
+           SubClassOf(:A DataMaxCardinality(1 :dp))\n\
+         )",
+    );
+
+    assert!(
+        report.contains("LiteralConflict"),
+        "DataMaxCardinality(1) with distinct literals should produce LiteralConflict: {report}"
+    );
+    assert!(
+        report.contains("http://example.com/x"),
+        "LiteralConflict should identify the individual: {report}"
+    );
+}
+
+#[test]
+fn datatype_definition_equivalence() {
+    // DatatypeDefinition(MyInt, xsd:integer) → SubDataPropertyOf works with types
+    let inferred = reason(
+        "<http://example.com/x> <http://example.com/dp> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)\n\
+         Ontology(\n\
+           Declaration(Class(:A))\n\
+           Declaration(Datatype(:MyInt))\n\
+           Declaration(DataProperty(:dp))\n\
+           DatatypeDefinition(:MyInt xsd:integer)\n\
+           SubClassOf(DataSomeValuesFrom(:dp :MyInt) :A)\n\
+         )",
+    );
+
+    assert!(
+        inferred.contains("<http://example.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/A>"),
+        "DatatypeDefinition should make MyInt equivalent to xsd:integer: {inferred}"
+    );
+}
+
 fn count_triples(ntriples: &str) -> usize {
     ntriples.lines().filter(|l| !l.trim().is_empty()).count()
 }

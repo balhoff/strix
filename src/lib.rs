@@ -108,6 +108,7 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
     let extract_schema = args.extract_ontology || args.ontology.is_none();
     let ignore_annotation_axioms = args.ignore_annotation_axioms;
     let mut input_triples = 0usize;
+    let mut literal_types: Vec<(dict::TermId, dict::TermId)> = Vec::new();
 
     tracing::info!("Ingesting data");
     let ingest_timer = StageTimer::start();
@@ -120,6 +121,7 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
                 &mut dictionary,
                 &mut extracted_schema,
                 &mut store,
+                &mut literal_types,
             )
         })?;
     }
@@ -147,7 +149,7 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
 
     tracing::info!("Compiling schema");
     let compile_timer = StageTimer::start();
-    let compiled_schema = compile_schema(&schema, well_known.owl_thing);
+    let compiled_schema = compile_schema(&schema, well_known.owl_thing, well_known.rdfs_literal);
     let schema_compile_time_ms = compile_timer.elapsed_ms();
 
     // Inject type assertions from ontology ABox axioms (OneOf subclass, ClassAssertion)
@@ -158,6 +160,16 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
     for &(subject, predicate, object) in &schema.extra_property_assertions {
         store.insert_asserted_property(subject, predicate, object)?;
     }
+    // Inject type(literal, datatype) only if the schema uses data range restrictions.
+    // Without data range restrictions these are dead weight in the reasoning loop.
+    if schema.has_data_range_restrictions {
+        for &(literal, datatype) in &schema.literal_datatype_types {
+            store.insert_asserted_type(literal, datatype)?;
+        }
+        for &(literal, datatype) in &literal_types {
+            store.insert_asserted_type(literal, datatype)?;
+        }
+    }
 
     tracing::info!("Materializing inferences");
     let reasoning_timer = StageTimer::start();
@@ -165,12 +177,14 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
         stats: reasoning_stats,
         mut union_find,
         swrl_different_pairs,
+        literal_conflicts,
     } = materialize(
         &mut store,
         &compiled_schema,
         args.max_iterations,
         engine_budget,
         well_known.owl_same_as,
+        &dictionary,
     )?;
     let reasoning_time_ms = reasoning_timer.elapsed_ms();
 
@@ -199,13 +213,14 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
         all_different_pairs.extend_from_slice(&disjoint_prop_different);
     }
 
-    let inconsistencies = inconsistency::check_inconsistencies(
+    let mut inconsistencies = inconsistency::check_inconsistencies(
         &mut store,
         &compiled_schema,
         Some(&mut union_find),
         &all_different_pairs,
         disjoint_prop_assertions.as_ref(),
     )?;
+    inconsistencies.extend(literal_conflicts);
     let inconsistency_reports: Vec<InconsistencyReport> = inconsistencies
         .iter()
         .map(|inc| format_inconsistency(inc, &dictionary, &compiled_schema.proxy_display))
@@ -419,6 +434,21 @@ fn format_inconsistency(
                 format_term(*subject, dictionary, proxy_display),
                 format_term(*property, dictionary, proxy_display),
                 format_term(*object, dictionary, proxy_display),
+            ),
+        },
+        Inconsistency::LiteralConflict {
+            individual,
+            property,
+            literal_a,
+            literal_b,
+        } => InconsistencyReport {
+            kind: "LiteralConflict".to_string(),
+            detail: format!(
+                "{} has values {} and {} for {}, which requires at most one value",
+                format_term(*individual, dictionary, proxy_display),
+                format_term(*literal_a, dictionary, proxy_display),
+                format_term(*literal_b, dictionary, proxy_display),
+                format_term(*property, dictionary, proxy_display),
             ),
         },
     }

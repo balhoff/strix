@@ -49,6 +49,14 @@ pub enum Inconsistency {
         property: TermId,
         object: TermId,
     },
+    /// Equality rules (FunctionalProperty, MaxCardinality 1) tried to merge
+    /// two distinct literals. Literal identity is fixed, so this is inconsistent.
+    LiteralConflict {
+        individual: TermId,
+        property: TermId,
+        literal_a: TermId,
+        literal_b: TermId,
+    },
 }
 
 /// Check the fully materialized store for logical inconsistencies.

@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use horned_owl::io::{ParserConfiguration, ofn, owx, rdf};
 use horned_owl::model::{
-    Atom, ClassExpression, Component, IArgument, Individual, Literal, ObjectPropertyExpression,
-    PropertyExpression, RcStr, SubObjectPropertyExpression,
+    Atom, ClassExpression, Component, DArgument, DataRange, IArgument, Individual, Literal,
+    ObjectPropertyExpression, PropertyExpression, RcStr, SubObjectPropertyExpression,
 };
 use horned_owl::ontology::set::SetOntology;
 use oxrdfio::RdfFormat as OxRdfFormat;
@@ -612,7 +612,13 @@ fn absorb_ontology(
             Component::DataPropertyAssertion(axiom) => {
                 if let Ok(from) = encode_individual(&axiom.from, dictionary) {
                     let prop = dictionary.encode_iri(axiom.dp.as_ref());
-                    let value = dictionary.encode(encode_horned_literal(&axiom.to));
+                    let rdf_literal = encode_horned_literal(&axiom.to);
+                    let dt_id = literal_datatype_iri(&rdf_literal)
+                        .map(|iri| dictionary.encode_iri(iri));
+                    let value = dictionary.encode(rdf_literal);
+                    if let Some(dt_id) = dt_id {
+                        schema.literal_datatype_types.push((value, dt_id));
+                    }
                     schema.extra_property_assertions.push((from, prop, value));
                 }
             }
@@ -623,12 +629,27 @@ fn absorb_ontology(
                     .unsupported
                     .insert("owl:imports not yet implemented".to_string());
             }
-            Component::DataPropertyRange(_)
-            | Component::DisjointDataProperties(_)
-            | Component::DatatypeDefinition { .. } => {
-                schema
-                    .unsupported
-                    .insert("data property restrictions deferred to a later phase".to_string());
+            Component::DataPropertyRange(axiom) => {
+                let property = dictionary.encode_iri(axiom.dp.as_ref());
+                if let Some(range) = encode_data_range(&axiom.dr, dictionary, schema) {
+                    schema.ranges.insert((property, range));
+                    schema.has_data_range_restrictions = true;
+                }
+            }
+            Component::DisjointDataProperties(axiom) => {
+                let props: Vec<TermId> = axiom
+                    .0
+                    .iter()
+                    .map(|dp| dictionary.encode_iri(dp.as_ref()))
+                    .collect();
+                schema.disjoint_properties.push(props);
+            }
+            Component::DatatypeDefinition(axiom) => {
+                let kind_id = dictionary.encode_iri(axiom.kind.as_ref());
+                if let Some(range_id) = encode_data_range(&axiom.range, dictionary, schema) {
+                    schema.subclasses.insert((kind_id, range_id));
+                    schema.subclasses.insert((range_id, kind_id));
+                }
             }
             Component::IrreflexiveObjectProperty(axiom) => {
                 let prop = encode_object_property(&axiom.0, dictionary, schema);
@@ -794,12 +815,45 @@ fn lower_named_sub_anon_super(
         | ClassExpression::ObjectHasSelf(_)
         | ClassExpression::ObjectMinCardinality { .. }
         | ClassExpression::ObjectExactCardinality { .. } => false,
-        // Data property restrictions deferred
+        // A ⊆ ∀dp.DR → allValuesFrom(A, dp, DR)
+        ClassExpression::DataAllValuesFrom { dp, dr } => {
+            let prop = dictionary.encode_iri(dp.as_ref());
+            if let Some(filler) = encode_data_range(dr, dictionary, schema) {
+                schema.all_values_from.push((sub_id, prop, filler));
+                schema.has_data_range_restrictions = true;
+                true
+            } else {
+                false
+            }
+        }
+        // A ⊆ ∃dp.{v} → has_value_sub(A, dp, v)
+        ClassExpression::DataHasValue { dp, l } => {
+            let prop = dictionary.encode_iri(dp.as_ref());
+            let val = dictionary.encode(encode_horned_literal(l));
+            schema.has_value_sub.push((sub_id, prop, val));
+            // DataHasValue does not need literal-type assertions (matches by value identity)
+            true
+        }
+        // A ⊆ MaxCard(n, dp, DR)
+        ClassExpression::DataMaxCardinality { n, dp, dr } => {
+            if *n > 1 {
+                return false;
+            }
+            let prop = dictionary.encode_iri(dp.as_ref());
+            let filler = encode_data_range(dr, dictionary, schema);
+            if *n == 0 {
+                schema.max_card_zero.push((sub_id, prop, filler));
+            } else {
+                schema.max_card_one.push((sub_id, prop, filler));
+            }
+            if filler.is_some() {
+                schema.has_data_range_restrictions = true;
+            }
+            true
+        }
+        // Not useful for RL in this direction
         ClassExpression::DataSomeValuesFrom { .. }
-        | ClassExpression::DataAllValuesFrom { .. }
-        | ClassExpression::DataHasValue { .. }
         | ClassExpression::DataMinCardinality { .. }
-        | ClassExpression::DataMaxCardinality { .. }
         | ClassExpression::DataExactCardinality { .. } => false,
     }
 }
@@ -888,10 +942,27 @@ fn lower_anon_sub_named_super(
         | ClassExpression::ObjectMinCardinality { .. }
         | ClassExpression::ObjectMaxCardinality { .. }
         | ClassExpression::ObjectExactCardinality { .. } => false,
-        // Data property restrictions deferred
-        ClassExpression::DataSomeValuesFrom { .. }
-        | ClassExpression::DataAllValuesFrom { .. }
-        | ClassExpression::DataHasValue { .. }
+        // ∃dp.DR ⊆ C → someValuesFrom(C, dp, DR)
+        ClassExpression::DataSomeValuesFrom { dp, dr } => {
+            let prop = dictionary.encode_iri(dp.as_ref());
+            if let Some(filler) = encode_data_range(dr, dictionary, schema) {
+                schema.some_values_from.push((sup_id, prop, filler));
+                schema.has_data_range_restrictions = true;
+                true
+            } else {
+                false
+            }
+        }
+        // ∃dp.{v} ⊆ C → has_value_super(C, dp, v)
+        ClassExpression::DataHasValue { dp, l } => {
+            let prop = dictionary.encode_iri(dp.as_ref());
+            let val = dictionary.encode(encode_horned_literal(l));
+            schema.has_value_super.push((sup_id, prop, val));
+            // DataHasValue does not need literal-type assertions (matches by value identity)
+            true
+        }
+        // Not useful for RL in this direction
+        ClassExpression::DataAllValuesFrom { .. }
         | ClassExpression::DataMinCardinality { .. }
         | ClassExpression::DataMaxCardinality { .. }
         | ClassExpression::DataExactCardinality { .. } => false,
@@ -1007,22 +1078,22 @@ fn format_ce(ce: &ClassExpression<RcStr>) -> String {
             format!("ObjectExactCardinality({n} {} {})", format_ope(ope), format_ce(bce))
         }
         ClassExpression::DataSomeValuesFrom { dp, dr } => {
-            format!("DataSomeValuesFrom(<{}> {:?})", dp.as_ref(), dr)
+            format!("DataSomeValuesFrom(<{}> {})", dp.as_ref(), format_data_range(dr))
         }
         ClassExpression::DataAllValuesFrom { dp, dr } => {
-            format!("DataAllValuesFrom(<{}> {:?})", dp.as_ref(), dr)
+            format!("DataAllValuesFrom(<{}> {})", dp.as_ref(), format_data_range(dr))
         }
         ClassExpression::DataHasValue { dp, l } => {
             format!("DataHasValue(<{}> {:?})", dp.as_ref(), l)
         }
         ClassExpression::DataMinCardinality { n, dp, dr } => {
-            format!("DataMinCardinality({n} <{}> {:?})", dp.as_ref(), dr)
+            format!("DataMinCardinality({n} <{}> {})", dp.as_ref(), format_data_range(dr))
         }
         ClassExpression::DataMaxCardinality { n, dp, dr } => {
-            format!("DataMaxCardinality({n} <{}> {:?})", dp.as_ref(), dr)
+            format!("DataMaxCardinality({n} <{}> {})", dp.as_ref(), format_data_range(dr))
         }
         ClassExpression::DataExactCardinality { n, dp, dr } => {
-            format!("DataExactCardinality({n} <{}> {:?})", dp.as_ref(), dr)
+            format!("DataExactCardinality({n} <{}> {})", dp.as_ref(), format_data_range(dr))
         }
     }
 }
@@ -1061,6 +1132,71 @@ fn encode_named_class(
     }
 }
 
+/// Encode an OWL 2 DataRange as a class TermId.
+///
+/// Per OWL 2 RL §4.2.4, only `Datatype` and `DataIntersectionOf` are supported.
+/// Named datatypes map directly to IRIs; intersections get a proxy with
+/// `intersection_of` axioms so cls-int1/cls-int2 handle membership.
+fn encode_data_range(
+    dr: &DataRange<RcStr>,
+    dictionary: &mut Dictionary,
+    schema: &mut RawSchema,
+) -> Option<TermId> {
+    match dr {
+        DataRange::Datatype(dt) => Some(dictionary.encode_iri(dt.as_ref())),
+        DataRange::DataIntersectionOf(ranges) => {
+            if let Some(&existing) = schema.data_range_cache.get(dr) {
+                return Some(existing);
+            }
+            let range_ids: Vec<TermId> = ranges
+                .iter()
+                .filter_map(|r| encode_data_range(r, dictionary, schema))
+                .collect();
+            if range_ids.len() != ranges.len() || range_ids.len() < 2 {
+                return None;
+            }
+            let proxy = fresh_proxy_term(schema, dictionary);
+            schema.intersection_of.push((proxy, range_ids));
+            schema
+                .proxy_display
+                .insert(proxy, format_data_range(dr));
+            schema.data_range_cache.insert(dr.clone(), proxy);
+            Some(proxy)
+        }
+        _ => None,
+    }
+}
+
+/// Return true if a DataRange would produce a usable TermId via `encode_data_range`.
+fn is_useful_data_range(dr: &DataRange<RcStr>) -> bool {
+    match dr {
+        DataRange::Datatype(_) => true,
+        DataRange::DataIntersectionOf(ranges) => {
+            ranges.len() >= 2 && ranges.iter().all(is_useful_data_range)
+        }
+        _ => false,
+    }
+}
+
+fn format_data_range(dr: &DataRange<RcStr>) -> String {
+    match dr {
+        DataRange::Datatype(dt) => format!("<{}>", dt.as_ref()),
+        DataRange::DataIntersectionOf(ranges) => {
+            let parts: Vec<String> = ranges.iter().map(format_data_range).collect();
+            format!("DataIntersectionOf({})", parts.join(" "))
+        }
+        _ => format!("{:?}", dr),
+    }
+}
+
+/// Extract the datatype IRI from an RDF literal term, if present.
+fn literal_datatype_iri(term: &RdfTerm) -> Option<&str> {
+    match term {
+        RdfTerm::Literal(lit) => lit.datatype.as_deref(),
+        _ => None,
+    }
+}
+
 /// Return true if a CE in sub-class position would generate at least one schema entry.
 /// Mirrors the logic of `lower_anon_sub_named_super`: IntersectionOf is all-or-nothing
 /// (dropping a condition is unsound), UnionOf allows partial handling.
@@ -1076,6 +1212,8 @@ fn is_useful_sub_ce(ce: &ClassExpression<RcStr>) -> bool {
         ClassExpression::ObjectOneOf(individuals) => {
             individuals.iter().any(|i| matches!(i, Individual::Named(_)))
         }
+        ClassExpression::DataSomeValuesFrom { dr, .. } => is_useful_data_range(dr),
+        ClassExpression::DataHasValue { .. } => true,
         _ => false,
     }
 }
@@ -1095,6 +1233,9 @@ fn is_useful_super_ce(ce: &ClassExpression<RcStr>) -> bool {
             *n <= 1 && is_useful_sub_ce(bce)
         }
         ClassExpression::ObjectComplementOf(bce) => is_useful_sub_ce(bce),
+        ClassExpression::DataAllValuesFrom { dr, .. } => is_useful_data_range(dr),
+        ClassExpression::DataHasValue { .. } => true,
+        ClassExpression::DataMaxCardinality { n, .. } => *n <= 1,
         _ => false,
     }
 }
@@ -1261,7 +1402,16 @@ fn convert_swrl_atom(
             let right = convert_iargument(right, dictionary)?;
             Ok(RawSwrlAtom::DifferentIndividualsAtom { left, right })
         }
-        Atom::DataPropertyAtom { .. } => Err("SWRL DataPropertyAtom not supported".to_string()),
+        Atom::DataPropertyAtom { pred, args } => {
+            let property = dictionary.encode_iri(pred.as_ref());
+            let subject = convert_dargument(&args.0, dictionary)?;
+            let object = convert_dargument(&args.1, dictionary)?;
+            Ok(RawSwrlAtom::PropertyAtom {
+                property,
+                subject,
+                object,
+            })
+        }
         Atom::DataRangeAtom { .. } => Err("SWRL DataRangeAtom not supported".to_string()),
         Atom::BuiltInAtom { .. } => Err("SWRL BuiltInAtom not supported".to_string()),
     }
@@ -1279,6 +1429,22 @@ fn convert_iargument(
         IArgument::Individual(ind) => {
             let id = encode_individual(ind, dictionary)
                 .map_err(|()| "SWRL atom with anonymous individual".to_string())?;
+            Ok(RawSwrlArg::Constant(id))
+        }
+    }
+}
+
+fn convert_dargument(
+    arg: &DArgument<RcStr>,
+    dictionary: &mut Dictionary,
+) -> std::result::Result<RawSwrlArg, String> {
+    match arg {
+        DArgument::Variable(v) => {
+            let id = dictionary.encode_iri(v.0.as_ref());
+            Ok(RawSwrlArg::Variable(id))
+        }
+        DArgument::Literal(lit) => {
+            let id = dictionary.encode(encode_horned_literal(lit));
             Ok(RawSwrlArg::Constant(id))
         }
     }

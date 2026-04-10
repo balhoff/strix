@@ -157,7 +157,11 @@ impl CompiledSchema {
 /// - Drop allValuesFrom / domain / range entries with owl:Thing (trivially true).
 /// - Remove owl:Thing from intersectionOf conjunct lists.
 /// - Normalize MaxCardinality entries with owl:Thing filler to unqualified.
-pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
+///
+/// `rdfs_literal` is the TermId for `rdfs:Literal` (the top data range).
+/// It is treated like `owl:Thing` for data property restriction fillers.
+pub fn compile_schema(schema: &RawSchema, owl_thing: TermId, rdfs_literal: TermId) -> CompiledSchema {
+    let is_top = |id: TermId| id == owl_thing || id == rdfs_literal;
     let (mut subclass_closure, subclass_iterations, subclass_inferred) =
         transitive_closure(&schema.subclasses);
     let (subproperty_closure, subproperty_iterations, subproperty_inferred) =
@@ -167,13 +171,13 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
     // is of type C. Collect before filtering so we don't lose them.
     let universal_types: Vec<TermId> = subclass_closure
         .iter()
-        .filter(|&&(sub, sup)| sub == owl_thing && sup != owl_thing)
+        .filter(|&&(sub, sup)| sub == owl_thing && !is_top(sup))
         .map(|&(_, sup)| sup)
         .collect();
 
-    // Strip owl:Thing as both superclass target (trivially true for every
-    // individual) and as subclass source (now handled by universal_types).
-    subclass_closure.retain(|&(sub, sup)| sup != owl_thing && sub != owl_thing);
+    // Strip owl:Thing / rdfs:Literal as both superclass target (trivially true
+    // for every individual) and as subclass source (now handled by universal_types).
+    subclass_closure.retain(|&(sub, sup)| !is_top(sup) && !is_top(sub));
 
     let mut has_value_by_prop: BTreeMap<TermId, Vec<(TermId, TermId)>> = BTreeMap::new();
     let mut has_value_by_class: BTreeMap<TermId, Vec<(TermId, TermId)>> = BTreeMap::new();
@@ -195,7 +199,7 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
     let mut some_values_from_by_filler: BTreeMap<TermId, Vec<(TermId, TermId)>> = BTreeMap::new();
     let mut svf_thing_by_prop: BTreeMap<TermId, Vec<TermId>> = BTreeMap::new();
     for &(class, prop, filler) in &schema.some_values_from {
-        if filler == owl_thing {
+        if is_top(filler) {
             svf_thing_by_prop.entry(prop).or_default().push(class);
         } else {
             some_values_from_by_prop
@@ -213,7 +217,7 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
     let mut all_values_from_by_class: BTreeMap<TermId, Vec<(TermId, TermId)>> = BTreeMap::new();
     let mut all_values_from_by_prop: BTreeMap<TermId, Vec<(TermId, TermId)>> = BTreeMap::new();
     for &(class, prop, filler) in &schema.all_values_from {
-        if filler == owl_thing {
+        if is_top(filler) {
             continue;
         }
         all_values_from_by_class
@@ -233,7 +237,7 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
         let filtered: Vec<TermId> = conjuncts
             .iter()
             .copied()
-            .filter(|&c| c != owl_thing)
+            .filter(|&c| !is_top(c))
             .collect();
         if filtered.is_empty() {
             continue;
@@ -244,18 +248,18 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
         }
     }
 
-    // Domain/range: filter out owl:Thing targets (trivially true)
+    // Domain/range: filter out owl:Thing / rdfs:Literal targets (trivially true)
     let filtered_domains: BTreeSet<(TermId, TermId)> = schema
         .domains
         .iter()
         .copied()
-        .filter(|&(_, cls)| cls != owl_thing)
+        .filter(|&(_, cls)| !is_top(cls))
         .collect();
     let filtered_ranges: BTreeSet<(TermId, TermId)> = schema
         .ranges
         .iter()
         .copied()
-        .filter(|&(_, cls)| cls != owl_thing)
+        .filter(|&(_, cls)| !is_top(cls))
         .collect();
 
     // Property chains: normalize self-join chains [p,p,...] → p to transitive
@@ -274,11 +278,11 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
         }
     }
 
-    // MaxCardinality 1: normalize owl:Thing filler to None (unqualified).
+    // MaxCardinality 1: normalize owl:Thing / rdfs:Literal filler to None (unqualified).
     let max_card_one: Vec<(TermId, TermId, Option<TermId>)> = schema
         .max_card_one
         .iter()
-        .map(|&(cls, prop, filler)| (cls, prop, filler.filter(|&f| f != owl_thing)))
+        .map(|&(cls, prop, filler)| (cls, prop, filler.filter(|&f| !is_top(f))))
         .collect();
     let mut max_card_one_by_prop: BTreeMap<TermId, Vec<(TermId, Option<TermId>)>> = BTreeMap::new();
     for &(cls, prop, filler) in &max_card_one {
@@ -292,11 +296,11 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId) -> CompiledSchema {
     let complement_pairs: Vec<(TermId, TermId)> = schema.complement_of.iter().copied().collect();
     let disjoint_property_pairs = flatten_pairwise(&schema.disjoint_properties);
 
-    // MaxCardinality 0: normalize owl:Thing filler to None.
+    // MaxCardinality 0: normalize owl:Thing / rdfs:Literal filler to None.
     let max_card_zero: Vec<(TermId, TermId, Option<TermId>)> = schema
         .max_card_zero
         .iter()
-        .map(|&(cls, prop, filler)| (cls, prop, filler.filter(|&f| f != owl_thing)))
+        .map(|&(cls, prop, filler)| (cls, prop, filler.filter(|&f| !is_top(f))))
         .collect();
 
     // Compile SWRL rules

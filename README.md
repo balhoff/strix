@@ -89,7 +89,10 @@ strix reason data.nt -O ontology.ofn -o inferred.nt --report report.json
 | SubDataPropertyOf | supported |
 | EquivalentDataProperties | supported (decomposed to mutual SubPropertyOf) |
 | DataPropertyDomain | supported |
+| DataPropertyRange | supported (named datatypes and DataIntersectionOf) |
 | FunctionalDataProperty | supported (equality via owl:sameAs) |
+| DisjointDataProperties | supported (inconsistency detection) |
+| DatatypeDefinition | supported (mutual subclass equivalence) |
 | SubAnnotationPropertyOf | supported (unless `--ignore-annotation-axioms`) |
 | AnnotationPropertyDomain/Range | supported (unless `--ignore-annotation-axioms`) |
 
@@ -105,6 +108,8 @@ strix reason data.nt -O ontology.ofn -o inferred.nt --report report.json
 | ObjectSomeValuesFrom | supported (cls-svf1: property link to filler-typed individual implies superclass) |
 | ObjectHasValue | supported (cls-hv1: property with specific value implies superclass) |
 | ObjectOneOf | supported (each named individual gets the superclass type) |
+| DataSomeValuesFrom | supported (typed literal with matching datatype implies superclass) |
+| DataHasValue | supported (property with specific literal implies superclass) |
 
 **In superclass (right) position:**
 
@@ -117,14 +122,15 @@ strix reason data.nt -O ontology.ofn -o inferred.nt --report report.json
 | ObjectMaxCardinality 0 | supported (inconsistency detection) |
 | ObjectMaxCardinality 1 | supported (equality via owl:sameAs) |
 | ObjectComplementOf | supported (inconsistency detection) |
+| DataAllValuesFrom | supported (all data property values get the filler datatype) |
+| DataHasValue | supported (class membership implies data property assertion) |
+| DataMaxCardinality 0 | supported (inconsistency detection) |
+| DataMaxCardinality 1 | supported (equality via owl:sameAs) |
 
 ### Not yet implemented
 
 | Construct | Notes |
 |---|---|
-| owl:HasKey | Deferred |
-| Data property restrictions | DataSomeValuesFrom, DataAllValuesFrom, DataHasValue, etc. |
-| SWRL rules | Deferred to a later phase |
 | owl:imports | Not supported |
 
 ### Filtering
