@@ -67,3 +67,39 @@ Add a tunable Bloom filter sized from the memory budget, inserted before the str
 ~100 lines of near-identical code between `BinaryRelation` and `TernaryRelation`. Could be unified into `Relation<T>` parameterized over tuple type, with a trait for serialization.
 
 **Impact**: Reduces maintenance burden — any change to one currently must be mirrored in the other.
+
+---
+
+## Pipeline parallelism (broad-scale)
+
+These optimizations introduce concurrency across pipeline stages. They are best tackled after the single-threaded engine optimizations above are in place, since they add architectural complexity and their benefit depends on having efficient per-stage work to overlap.
+
+### Pipeline: parallel ontology and data loading
+
+Ontology parsing (via horned-owl) and data file parsing (via oxrdfio) are independent I/O-bound tasks. They can run on separate threads, with the engine waiting on whichever finishes last before starting compilation. When `--extract-ontology` is used, data parsing must feed TBox triples to the ontology builder, but even then the separate `--ontology` file can load concurrently.
+
+**Impact**: Reduces wall-clock time by overlapping two I/O-bound stages. Most beneficial when both the ontology and data files are large.
+
+### Pipeline: parallel data file parsing
+
+Multiple input data files can be parsed concurrently, each on its own thread, feeding encoded facts into the relation store through a shared bounded channel. This is a natural extension of the existing streaming ingest — the dictionary must be thread-safe (concurrent `get_or_insert`), but the relation store already appends unsorted facts to buffers that are sorted later.
+
+**Impact**: Scales ingest throughput with the number of input files and available cores. Particularly valuable for directory inputs containing many files.
+
+### Pipeline: overlapped ingest and inference
+
+Rather than waiting for all data files to finish parsing before starting inference, the engine could begin reasoning over facts ingested so far while parsing continues. New asserted facts would feed into subsequent fixpoint iterations as they arrive. This requires the semi-naive loop to treat the asserted segment as a growing input — new asserted facts are effectively a delta that triggers re-evaluation, similar to how derived deltas work today.
+
+**Impact**: Reduces end-to-end latency by overlapping I/O-bound parsing with CPU-bound inference. Most beneficial for large multi-file inputs where parsing takes a significant fraction of total wall time. Adds complexity to the fixpoint loop and requires careful handling of schema facts (the ontology/TBox must be fully loaded before inference can start, since rule compilation depends on it).
+
+### Pipeline: streaming output during inference
+
+Currently output serialization is a separate phase after all inference completes. Instead, derived facts could be written out as they are produced — each iteration's delta could be decoded and serialized to the output stream immediately after being merged into the derived store. For `--emit inferred` this is straightforward since each delta fact is new. For `--emit closure`, asserted facts can be written first, then deltas streamed as they arrive.
+
+**Impact**: Reduces end-to-end latency by overlapping output I/O with inference computation. Also reduces peak memory pressure since decoded terms don't need to be buffered. Most beneficial for large inferences where the export phase is a significant fraction of wall time.
+
+### Inference: parallel rule evaluation within a stratum
+
+Independent rules within the same stratum can be evaluated concurrently on separate threads, each producing candidate facts into thread-local buffers that are merged at the end of each iteration. This is the "Phase 4" parallelism described in the implementation plan.
+
+**Impact**: Scales inference throughput with available cores. Requires careful partitioning of rules to avoid write contention on shared indexes. Most beneficial for strata with many independent rules (e.g., the main OWL RL ABox stratum).

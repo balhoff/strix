@@ -16,6 +16,8 @@ use crate::store::relation::{BinaryRelation, TernaryRelation};
 use inconsistency::Inconsistency;
 pub use sameas::UnionFind;
 
+use crate::output::report::{IterationReport, RuleFirings};
+
 #[derive(Clone, Debug, Default)]
 pub struct ReasoningStats {
     pub iterations: usize,
@@ -24,6 +26,8 @@ pub struct ReasoningStats {
     pub fixpoint_reached: bool,
     pub equality_merges: usize,
     pub equality_iterations: usize,
+    pub iteration_details: Vec<IterationReport>,
+    pub rule_firings: RuleFirings,
 }
 
 impl ReasoningStats {
@@ -211,12 +215,20 @@ fn apply_type_rules(
     class: u64,
     schema: &CompiledSchema,
     candidate_types: &mut BinaryRelation,
+    firings: &mut RuleFirings,
 ) -> Result<()> {
-    for &superclass in schema.superclasses_for(class) {
-        candidate_types.push((instance, superclass))?;
+    let supers = schema.superclasses_for(class);
+    if !supers.is_empty() {
+        firings.subclass += supers.len();
+        for &superclass in supers {
+            candidate_types.push((instance, superclass))?;
+        }
     }
-    for &ut in &schema.universal_types {
-        candidate_types.push((instance, ut))?;
+    if !schema.universal_types.is_empty() {
+        firings.universal_type += schema.universal_types.len();
+        for &ut in &schema.universal_types {
+            candidate_types.push((instance, ut))?;
+        }
     }
     Ok(())
 }
@@ -236,9 +248,11 @@ fn apply_type_join_rules(
     indexes: &JoinIndexes<'_>,
     candidate_types: &mut BinaryRelation,
     candidate_properties: &mut TernaryRelation,
+    firings: &mut RuleFirings,
 ) -> Result<()> {
     // cls-int2: type(x,C) where C is intersection → emit conjuncts
     if let Some(conjuncts) = schema.intersection_conjuncts.get(&class) {
+        firings.intersection += conjuncts.len();
         for &conjunct in conjuncts {
             candidate_types.push((instance, conjunct))?;
         }
@@ -252,6 +266,7 @@ fn apply_type_join_rules(
                     .iter()
                     .all(|&c| c == class || indexes.types.has_type(instance, c));
                 if all_present {
+                    firings.intersection += 1;
                     candidate_types.push((instance, int_class))?;
                 }
             }
@@ -261,7 +276,9 @@ fn apply_type_join_rules(
     // cls-avf: type(x,A) where allValuesFrom(A,P,B) → for each property(x,P,y), emit type(y,B)
     if let Some(entries) = schema.all_values_from_by_class.get(&class) {
         for &(prop, filler) in entries {
-            for &y in indexes.properties.objects_for(prop, instance) {
+            let objects = indexes.properties.objects_for(prop, instance);
+            firings.all_values_from += objects.len();
+            for &y in objects {
                 candidate_types.push((y, filler))?;
             }
         }
@@ -269,16 +286,19 @@ fn apply_type_join_rules(
 
     // cls-hv2: type(x,A) where hasValue_sub(A,P,v) → emit property(x,P,v)
     if let Some(entries) = schema.has_value_by_class.get(&class) {
+        firings.has_value += entries.len();
         for &(prop, val) in entries {
             candidate_properties.push((instance, prop, val))?;
         }
     }
 
-    // cls-svf1 (type-triggered): type(y,D) where someValuesFrom(C,P,D) →
+    // cls-svf1 (type-triggered): type(y,D) where someValuesFrom(C,P,D) ���
     //   for each property(z,P,y) in prop_index, emit type(z,C)
     if let Some(entries) = schema.some_values_from_by_filler.get(&class) {
         for &(svf_class, prop) in entries {
-            for &z in indexes.properties.subjects_for(prop, instance) {
+            let subjects = indexes.properties.subjects_for(prop, instance);
+            firings.some_values_from += subjects.len();
+            for &z in subjects {
                 candidate_types.push((z, svf_class))?;
             }
         }
@@ -294,39 +314,62 @@ fn apply_property_rules(
     schema: &CompiledSchema,
     candidate_types: &mut BinaryRelation,
     candidate_properties: &mut TernaryRelation,
+    firings: &mut RuleFirings,
 ) -> Result<()> {
-    for &superproperty in schema.superproperties_for(predicate) {
-        candidate_properties.push((subject, superproperty, object))?;
+    let supers = schema.superproperties_for(predicate);
+    if !supers.is_empty() {
+        firings.subproperty += supers.len();
+        for &superproperty in supers {
+            candidate_properties.push((subject, superproperty, object))?;
+        }
     }
-    for &domain in schema.domains_for(predicate) {
-        candidate_types.push((subject, domain))?;
+    let doms = schema.domains_for(predicate);
+    if !doms.is_empty() {
+        firings.domain += doms.len();
+        for &domain in doms {
+            candidate_types.push((subject, domain))?;
+        }
     }
-    for &range in schema.ranges_for(predicate) {
-        candidate_types.push((object, range))?;
+    let rngs = schema.ranges_for(predicate);
+    if !rngs.is_empty() {
+        firings.range += rngs.len();
+        for &range in rngs {
+            candidate_types.push((object, range))?;
+        }
     }
-    for &inverse in schema.inverses_for(predicate) {
-        candidate_properties.push((object, inverse, subject))?;
+    let invs = schema.inverses_for(predicate);
+    if !invs.is_empty() {
+        firings.inverse += invs.len();
+        for &inverse in invs {
+            candidate_properties.push((object, inverse, subject))?;
+        }
     }
     if schema.is_symmetric(predicate) {
+        firings.symmetric += 1;
         candidate_properties.push((object, predicate, subject))?;
     }
     // cls-hv1: property(x,P,v) where hasValue_super(C,P,v) → type(x,C)
     if let Some(entries) = schema.has_value_by_prop.get(&predicate) {
         for &(class, val) in entries {
             if object == val {
+                firings.has_value += 1;
                 candidate_types.push((subject, class))?;
             }
         }
     }
     // svf-thing: property(x,P,_) → type(x,C) — no filler check needed
     if let Some(classes) = schema.svf_thing_by_prop.get(&predicate) {
+        firings.some_values_from += classes.len();
         for &class in classes {
             candidate_types.push((subject, class))?;
         }
     }
-    for &ut in &schema.universal_types {
-        candidate_types.push((subject, ut))?;
-        candidate_types.push((object, ut))?;
+    if !schema.universal_types.is_empty() {
+        firings.universal_type += schema.universal_types.len() * 2;
+        for &ut in &schema.universal_types {
+            candidate_types.push((subject, ut))?;
+            candidate_types.push((object, ut))?;
+        }
     }
     Ok(())
 }
@@ -345,12 +388,16 @@ fn apply_property_join_rules(
     indexes: &JoinIndexes<'_>,
     candidate_types: &mut BinaryRelation,
     candidate_properties: &mut TernaryRelation,
+    firings: &mut RuleFirings,
 ) -> Result<()> {
     if schema.is_transitive(predicate) {
-        for &z in indexes.properties.objects_for(predicate, object) {
+        let fwd = indexes.properties.objects_for(predicate, object);
+        let bwd = indexes.properties.subjects_for(predicate, subject);
+        firings.transitive += fwd.len() + bwd.len();
+        for &z in fwd {
             candidate_properties.push((subject, predicate, z))?;
         }
-        for &w in indexes.properties.subjects_for(predicate, subject) {
+        for &w in bwd {
             candidate_properties.push((w, predicate, object))?;
         }
     }
@@ -359,6 +406,7 @@ fn apply_property_join_rules(
     if let Some(entries) = schema.some_values_from_by_prop.get(&predicate) {
         for &(class, filler) in entries {
             if indexes.types.has_type(object, filler) {
+                firings.some_values_from += 1;
                 candidate_types.push((subject, class))?;
             }
         }
@@ -368,6 +416,7 @@ fn apply_property_join_rules(
     if let Some(entries) = schema.all_values_from_by_prop.get(&predicate) {
         for &(class, filler) in entries {
             if indexes.types.has_type(subject, class) {
+                firings.all_values_from += 1;
                 candidate_types.push((object, filler))?;
             }
         }
@@ -407,6 +456,8 @@ fn apply_property_join_rules(
                 }
             }
 
+            let count = starts.len() * ends.len();
+            firings.property_chain += count;
             for &s in &starts {
                 for &e in &ends {
                     candidate_properties.push((s, *super_prop, e))?;
@@ -433,6 +484,7 @@ struct SwrlSink<'a> {
     candidate_types: &'a mut BinaryRelation,
     candidate_properties: &'a mut TernaryRelation,
     different_pairs: &'a mut Vec<(TermId, TermId)>,
+    firings: &'a mut RuleFirings,
 }
 
 /// Apply SWRL rules triggered by a type delta.
@@ -461,6 +513,7 @@ fn apply_swrl_type_rules(
             &mut bindings,
             ctx,
             &mut |bindings| {
+                sink.firings.swrl += 1;
                 let _ = emit_head(
                     &rule.head,
                     bindings,
@@ -508,6 +561,7 @@ fn apply_swrl_property_rules(
             &mut bindings,
             ctx,
             &mut |bindings| {
+                sink.firings.swrl += 1;
                 let _ = emit_head(
                     &rule.head,
                     bindings,
@@ -1261,9 +1315,11 @@ fn inner_fixpoint(
         .flat_map(|&(a, b)| [(a, b), (b, a)])
         .collect();
 
+    let firings = &mut stats.rule_firings;
+
     for result in store.asserted_types_iter()? {
         let (instance, class) = result?;
-        apply_type_rules(instance, class, schema, candidate_types)?;
+        apply_type_rules(instance, class, schema, candidate_types, firings)?;
     }
     for result in store.asserted_properties_iter()? {
         let (subject, predicate, object) = result?;
@@ -1274,6 +1330,7 @@ fn inner_fixpoint(
             schema,
             candidate_types,
             candidate_properties,
+            firings,
         )?;
     }
 
@@ -1301,6 +1358,7 @@ fn inner_fixpoint(
                     &seed_indexes,
                     candidate_types,
                     candidate_properties,
+                    firings,
                 )?;
             }
             if has_swrl {
@@ -1308,6 +1366,7 @@ fn inner_fixpoint(
                     candidate_types,
                     candidate_properties,
                     different_pairs: swrl_state.different_pairs,
+                    firings,
                 };
                 apply_swrl_type_rules(instance, class, schema, &swrl_ctx, &mut sink)?;
             }
@@ -1323,6 +1382,7 @@ fn inner_fixpoint(
                     &seed_indexes,
                     candidate_types,
                     candidate_properties,
+                    firings,
                 )?;
             }
             if has_swrl {
@@ -1330,6 +1390,7 @@ fn inner_fixpoint(
                     candidate_types,
                     candidate_properties,
                     different_pairs: swrl_state.different_pairs,
+                    firings,
                 };
                 apply_swrl_property_rules(
                     subject, predicate, object, schema, &swrl_ctx, &mut sink,
@@ -1375,6 +1436,11 @@ fn inner_fixpoint(
 
         stats.inferred_types += new_type_count;
         stats.inferred_properties += new_prop_count;
+        stats.iteration_details.push(IterationReport {
+            iteration: stats.iterations,
+            new_types: new_type_count,
+            new_properties: new_prop_count,
+        });
 
         candidate_types.clear();
         candidate_properties.clear();
@@ -1405,10 +1471,11 @@ fn inner_fixpoint(
             owl_same_as: swrl_state.owl_same_as,
         };
 
+        let firings = &mut stats.rule_firings;
         for result in MergeBinaryIter::new(delta_types.segment_iters()?)? {
             let (instance, class) = result?;
             store.derived_types_mut().push((instance, class))?;
-            apply_type_rules(instance, class, schema, candidate_types)?;
+            apply_type_rules(instance, class, schema, candidate_types, firings)?;
             apply_type_join_rules(
                 instance,
                 class,
@@ -1416,12 +1483,14 @@ fn inner_fixpoint(
                 &known_indexes,
                 candidate_types,
                 candidate_properties,
+                firings,
             )?;
             if has_swrl {
                 let mut sink = SwrlSink {
                     candidate_types,
                     candidate_properties,
                     different_pairs: swrl_state.different_pairs,
+                    firings,
                 };
                 apply_swrl_type_rules(instance, class, schema, &swrl_ctx, &mut sink)?;
             }
@@ -1446,6 +1515,7 @@ fn inner_fixpoint(
             properties: &delta_prop_index,
         };
 
+        let firings = &mut stats.rule_firings;
         for result in MergeTernaryIter::new(delta_properties.segment_iters()?)? {
             let (subject, predicate, object) = result?;
             store
@@ -1458,6 +1528,7 @@ fn inner_fixpoint(
                 schema,
                 candidate_types,
                 candidate_properties,
+                firings,
             )?;
             // delta ⋈ known joins
             apply_property_join_rules(
@@ -1468,6 +1539,7 @@ fn inner_fixpoint(
                 &known_indexes,
                 candidate_types,
                 candidate_properties,
+                firings,
             )?;
             // delta ⋈ delta joins (property index only — type deltas already consumed above)
             apply_property_join_rules(
@@ -1478,12 +1550,14 @@ fn inner_fixpoint(
                 &delta_indexes,
                 candidate_types,
                 candidate_properties,
+                firings,
             )?;
             if has_swrl {
                 let mut sink = SwrlSink {
                     candidate_types,
                     candidate_properties,
                     different_pairs: swrl_state.different_pairs,
+                    firings,
                 };
                 apply_swrl_property_rules(
                     subject, predicate, object, schema, &swrl_ctx, &mut sink,

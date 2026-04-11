@@ -151,6 +151,40 @@ impl RawSchema {
     pub fn unsupported_constructs(&self) -> Vec<String> {
         self.unsupported.iter().cloned().collect()
     }
+
+    pub fn ontology_report(&self) -> crate::output::report::OntologyReport {
+        crate::output::report::OntologyReport {
+            total_axioms: self.total_axioms(),
+            subclass_of: self.subclasses.len(),
+            sub_property_of: self.subproperties.len(),
+            domain: self.domains.len(),
+            range: self.ranges.len(),
+            inverse_of: self.inverse_properties.len(),
+            symmetric_property: self.symmetric_properties.len(),
+            transitive_property: self.transitive_properties.len(),
+            functional_property: self.functional_properties.len(),
+            inverse_functional_property: self.inverse_functional_properties.len(),
+            property_chain: self.property_chains.len(),
+            has_value: self.has_value_super.len() + self.has_value_sub.len(),
+            some_values_from: self.some_values_from.len(),
+            all_values_from: self.all_values_from.len(),
+            intersection_of: self.intersection_of.len(),
+            complement_of: self.complement_of.len(),
+            one_of: self.one_of_types.len(),
+            max_cardinality_zero: self.max_card_zero.len(),
+            max_cardinality_one: self.max_card_one.len(),
+            disjoint_classes: self.disjoint_classes.len(),
+            disjoint_properties: self.disjoint_properties.len(),
+            irreflexive_property: self.irreflexive_properties.len(),
+            asymmetric_property: self.asymmetric_properties.len(),
+            has_key: self.has_key.len(),
+            same_individual: self.same_individuals.len(),
+            different_individuals: self.different_individuals.len(),
+            negative_property_assertion: self.negative_object_property_assertions.len()
+                + self.negative_data_property_assertions.len(),
+            swrl_rules: self.swrl_rules.len(),
+        }
+    }
 }
 
 #[derive(Debug)]

@@ -97,7 +97,6 @@ pub struct CompiledSchema {
 
     pub schema_iterations: usize,
     pub schema_inferred: usize,
-    pub rule_set: ir::RuleSet,
 
     /// Proxy TermIds created for anonymous class/property expressions.
     /// These must be filtered from output triples.
@@ -145,6 +144,101 @@ impl CompiledSchema {
 
     pub fn is_transitive(&self, property: TermId) -> bool {
         self.transitive_properties.contains(&property)
+    }
+
+    pub fn compiled_schema_report(&self) -> crate::output::report::CompiledSchemaReport {
+        crate::output::report::CompiledSchemaReport {
+            subclass_closure_size: self.superclasses.values().map(|v| v.len()).sum(),
+            subproperty_closure_size: self.superproperties.values().map(|v| v.len()).sum(),
+            domain_entries: self.domains.values().map(|v| v.len()).sum(),
+            range_entries: self.ranges.values().map(|v| v.len()).sum(),
+            inverse_entries: self.inverses.values().map(|v| v.len()).sum(),
+            property_chains: self.property_chains.len(),
+            chain_trigger_entries: self.chain_triggers.values().map(|v| v.len()).sum(),
+            universal_types: self.universal_types.len(),
+            has_value_rules: self.has_value_by_prop.values().map(|v| v.len()).sum::<usize>()
+                + self.has_value_by_class.values().map(|v| v.len()).sum::<usize>(),
+            some_values_from_rules: self
+                .some_values_from_by_prop
+                .values()
+                .map(|v| v.len())
+                .sum::<usize>()
+                + self.svf_thing_by_prop.values().map(|v| v.len()).sum::<usize>(),
+            all_values_from_rules: self
+                .all_values_from_by_class
+                .values()
+                .map(|v| v.len())
+                .sum(),
+            intersection_rules: self.intersection_conjuncts.len(),
+            max_cardinality_one_rules: self.max_card_one.len(),
+            swrl_rules_compiled: self.swrl_rules.len(),
+            indexed_predicates: self.indexed_predicates.len(),
+            indexed_classes: self.indexed_classes.len(),
+            proxy_terms: self.proxy_terms.len(),
+            schema_closure_iterations: self.schema_iterations,
+            schema_closure_inferred: self.schema_inferred,
+        }
+    }
+
+    /// Returns the list of rule categories that are active for this ontology
+    /// (i.e., have non-empty compiled lookup tables).
+    pub fn active_rules(&self) -> Vec<String> {
+        let mut active = Vec::new();
+        if !self.superclasses.is_empty() {
+            active.push("subclass-propagation".to_string());
+        }
+        if !self.superproperties.is_empty() {
+            active.push("subproperty-propagation".to_string());
+        }
+        if !self.domains.is_empty() {
+            active.push("domain-inference".to_string());
+        }
+        if !self.ranges.is_empty() {
+            active.push("range-inference".to_string());
+        }
+        if !self.inverses.is_empty() {
+            active.push("inverse-property".to_string());
+        }
+        if !self.symmetric_properties.is_empty() {
+            active.push("symmetric-property".to_string());
+        }
+        if !self.transitive_properties.is_empty() {
+            active.push("transitive-property".to_string());
+        }
+        if !self.property_chains.is_empty() {
+            active.push("property-chain".to_string());
+        }
+        if !self.universal_types.is_empty() {
+            active.push("universal-type".to_string());
+        }
+        if !self.has_value_by_prop.is_empty() || !self.has_value_by_class.is_empty() {
+            active.push("has-value".to_string());
+        }
+        if !self.some_values_from_by_prop.is_empty() || !self.svf_thing_by_prop.is_empty() {
+            active.push("some-values-from".to_string());
+        }
+        if !self.all_values_from_by_class.is_empty() {
+            active.push("all-values-from".to_string());
+        }
+        if !self.intersection_conjuncts.is_empty() {
+            active.push("intersection-of".to_string());
+        }
+        if !self.functional_properties.is_empty() {
+            active.push("functional-property".to_string());
+        }
+        if !self.inverse_functional_properties.is_empty() {
+            active.push("inverse-functional-property".to_string());
+        }
+        if !self.max_card_one.is_empty() {
+            active.push("max-cardinality-one".to_string());
+        }
+        if !self.has_key.is_empty() {
+            active.push("has-key".to_string());
+        }
+        if !self.swrl_rules.is_empty() {
+            active.push("swrl".to_string());
+        }
+        active
     }
 }
 
@@ -391,7 +485,6 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId, rdfs_literal: TermI
         indexed_classes,
         schema_iterations: subclass_iterations.max(subproperty_iterations),
         schema_inferred: subclass_inferred + subproperty_inferred,
-        rule_set: ir::RuleSet::build(),
         proxy_terms: schema.proxy_terms.clone(),
         proxy_display: schema.proxy_display.clone(),
     }

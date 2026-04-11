@@ -51,7 +51,7 @@ fn reasons_with_separate_ontology() {
 
     let report_json = fs::read_to_string(&report).expect("report should exist");
     assert!(report_json.contains("\"fixpoint_reached\": true"));
-    assert!(report_json.contains("\"rdfs-subclass\""));
+    assert!(report_json.contains("\"subclass-propagation\""));
 }
 
 #[test]

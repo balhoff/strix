@@ -24,9 +24,7 @@ use dict::{Dictionary, WellKnown};
 use engine::inconsistency::{self, Inconsistency};
 use engine::{MaterializeResult, materialize};
 use error::Result;
-use output::report::{
-    InconsistencyReport, InputReport, ReasoningReport, RulesReport, RunReport, StratumReport,
-};
+use output::report::{InconsistencyReport, InputReport, ReasoningReport, RulesReport, RunReport, StratumReport};
 use output::{write_ntriples, write_run_report};
 use owl::{
     ExtractedSchema, RawSchema, ingest_data_triple, load_extracted_schema, load_ontology_path,
@@ -57,15 +55,15 @@ where
     let Cli {
         verbose,
         quiet,
-        benchmark,
+        benchmark: _,
         command,
     } = cli;
     match command {
-        Commands::Reason(reason_args) => run_reason(verbose, quiet, benchmark, reason_args),
+        Commands::Reason(reason_args) => run_reason(verbose, quiet, reason_args),
     }
 }
 
-fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Result<()> {
+fn run_reason(verbose: u8, quiet: bool, args: ReasonArgs) -> Result<()> {
     let filter = match (quiet, verbose) {
         (true, _) => EnvFilter::new("error"),
         (_, 0) => EnvFilter::new("info"),
@@ -258,19 +256,23 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
     )?;
     let export_time_ms = export_timer.elapsed_ms();
 
+    let total_inferred = reasoning_stats.total_inferred();
+    tracing::debug!(inferred = total_inferred, "Completed run");
+
     if let Some(report_path) = &args.report {
         tracing::info!("Writing run report");
         let report = RunReport {
-            version: 1,
+            version: 2,
             input: InputReport {
                 triples: input_triples,
-                tbox_axioms: schema.total_axioms(),
                 dictionary_terms: dictionary.len(),
                 output_triples: written_triples,
                 memory_budget_bytes: total_budget as u64,
             },
+            ontology: schema.ontology_report(),
+            compiled: compiled_schema.compiled_schema_report(),
             rules: RulesReport {
-                supported: compiled_schema.rule_set.rule_ids(),
+                active: compiled_schema.active_rules(),
                 unsupported_encountered: schema.unsupported_constructs(),
             },
             reasoning: ReasoningReport {
@@ -282,32 +284,28 @@ fn run_reason(verbose: u8, quiet: bool, benchmark: bool, args: ReasonArgs) -> Re
                         time_ms: schema_compile_time_ms,
                     },
                     StratumReport {
-                        name: "rdfs-abox".to_string(),
+                        name: "abox-materialization".to_string(),
                         iterations: reasoning_stats.iterations,
-                        inferred: reasoning_stats.total_inferred(),
+                        inferred: total_inferred,
                         time_ms: reasoning_time_ms,
                     },
                 ],
-                total_inferred: reasoning_stats.total_inferred(),
+                iterations: reasoning_stats.iteration_details,
+                total_inferred,
                 total_iterations: compiled_schema.schema_iterations + reasoning_stats.iterations,
                 fixpoint_reached: reasoning_stats.fixpoint_reached,
                 equality_merges: reasoning_stats.equality_merges,
                 equality_iterations: reasoning_stats.equality_iterations,
+                rule_firings: reasoning_stats.rule_firings,
                 inconsistencies: inconsistency_reports,
             },
-            peak_rss_bytes: if benchmark {
-                bench::peak_rss_bytes()
-            } else {
-                None
-            },
+            peak_rss_bytes: bench::peak_rss_bytes(),
             wall_time_ms: wall_clock.elapsed().as_millis(),
             ingest_time_ms,
             export_time_ms,
         };
         write_run_report(report_path, &report)?;
     }
-
-    tracing::debug!(inferred = reasoning_stats.total_inferred(), "Completed run");
 
     Ok(())
 }
