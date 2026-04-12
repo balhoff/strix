@@ -2146,6 +2146,55 @@ SubClassOf(:C :D)
     assert_eq!(count_triples(&inferred), 2, "hv1 + subclass: {inferred}");
 }
 
+#[test]
+fn has_value_generates_property_for_avf_join() {
+    // This tests a cross-rule interaction where type rules generate property
+    // candidates that must then trigger property join rules in a later iteration.
+    //
+    // Chain: type(x,A) → type(x,B) [subclass]
+    //        type(x,B) → prop(x,p,v) [HasValue]
+    //        type(x,B) ∧ prop(x,p,v) → type(v,D) [AllValuesFrom]
+    //
+    // The AllValuesFrom rule is property-triggered: it fires on a property delta
+    // and checks the type index. If the HasValue-generated property candidate is
+    // processed before type(x,B) is in the type index, the AVF rule must still
+    // eventually fire once the index catches up with a new property delta, OR the
+    // engine must ensure the index includes same-iteration type deltas.
+    let inferred = reason(
+        "<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .\n",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+Declaration(Class(:A))
+Declaration(Class(:B))
+Declaration(Class(:D))
+Declaration(NamedIndividual(:v))
+SubClassOf(:A :B)
+SubClassOf(:B ObjectHasValue(:p :v))
+SubClassOf(:B ObjectAllValuesFrom(:p :D))
+)",
+    );
+    // type(x,B), prop(x,p,v), type(v,D)
+    assert!(
+        inferred.contains(
+            "<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> ."
+        ),
+        "subclass: {inferred}"
+    );
+    assert!(
+        inferred.contains("<http://x.com/x> <http://x.com/p> <http://x.com/v> ."),
+        "HasValue: {inferred}"
+    );
+    assert!(
+        inferred.contains(
+            "<http://x.com/v> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/D> ."
+        ),
+        "AllValuesFrom should fire on HasValue-generated property: {inferred}"
+    );
+}
+
 // ─── owl:Thing handling ─────────────────────────────────────────────────────
 
 #[test]
