@@ -88,6 +88,20 @@ impl PropertyIndex {
         }
     }
 
+    /// Sort and dedup only the entries that were touched by recent inserts.
+    fn dedup_keys(&mut self, dirty: &[(TermId, TermId, TermId)]) {
+        for &(s, p, o) in dirty {
+            if let Some(v) = self.by_pred_subj.get_mut(&(p, s)) {
+                v.sort_unstable();
+                v.dedup();
+            }
+            if let Some(v) = self.by_pred_obj.get_mut(&(p, o)) {
+                v.sort_unstable();
+                v.dedup();
+            }
+        }
+    }
+
     /// Objects z such that property(subject, predicate, z) is known.
     fn objects_for(&self, predicate: TermId, subject: TermId) -> &[TermId] {
         self.by_pred_subj
@@ -164,6 +178,20 @@ impl TypeIndex {
         for values in self.by_class.values_mut() {
             values.sort_unstable();
             values.dedup();
+        }
+    }
+
+    /// Sort and dedup only the entries that were touched by recent inserts.
+    fn dedup_keys(&mut self, dirty: &[(TermId, TermId)]) {
+        for &(instance, class) in dirty {
+            if let Some(v) = self.by_instance.get_mut(&instance) {
+                v.sort_unstable();
+                v.dedup();
+            }
+            if let Some(v) = self.by_class.get_mut(&class) {
+                v.sort_unstable();
+                v.dedup();
+            }
         }
     }
 
@@ -1367,12 +1395,22 @@ fn inner_fixpoint(
         )?;
     }
 
+    // Persistent indexes, incrementally updated with each iteration's deltas.
+    let mut type_index = if needs_type_index {
+        build_type_index(store, schema)?
+    } else {
+        TypeIndex::new()
+    };
+    let mut known_prop_index = if needs_property_index {
+        build_property_index(store, schema)?
+    } else {
+        PropertyIndex::new()
+    };
+
     if needs_seed_join_pass || has_swrl {
-        let seed_type_index = build_type_index(store, schema)?;
-        let seed_prop_index = build_property_index(store, schema)?;
         let seed_indexes = JoinIndexes {
-            types: &seed_type_index,
-            properties: &seed_prop_index,
+            types: &type_index,
+            properties: &known_prop_index,
         };
         let swrl_ctx = SwrlContext {
             indexes: &seed_indexes,
@@ -1482,123 +1520,139 @@ fn inner_fixpoint(
         delta_types.compact()?;
         delta_properties.compact()?;
 
-        // Build in-memory indexes of known facts for join-based rules.
-        // Built BEFORE consuming deltas so they reflect the pre-delta state.
-        let type_index = if needs_type_index {
-            build_type_index(store, schema)?
-        } else {
-            TypeIndex::new()
-        };
-        let known_prop_index = if needs_property_index {
-            build_property_index(store, schema)?
-        } else {
-            PropertyIndex::new()
-        };
-        let known_indexes = JoinIndexes {
-            types: &type_index,
-            properties: &known_prop_index,
-        };
-        let swrl_ctx = SwrlContext {
-            indexes: &known_indexes,
-            union_find: swrl_state.union_find,
-            different_pairs: different_pairs_set.clone(),
-            owl_same_as: swrl_state.owl_same_as,
-        };
+        // Indexes reflect the pre-delta state; updated after rule application.
+        {
+            let known_indexes = JoinIndexes {
+                types: &type_index,
+                properties: &known_prop_index,
+            };
+            let swrl_ctx = SwrlContext {
+                indexes: &known_indexes,
+                union_find: swrl_state.union_find,
+                different_pairs: different_pairs_set.clone(),
+                owl_same_as: swrl_state.owl_same_as,
+            };
 
-        let firings = &mut stats.rule_firings;
-        for result in MergeBinaryIter::new(delta_types.segment_iters()?)? {
-            let (instance, class) = result?;
-            store.derived_types_mut().push((instance, class))?;
-            apply_type_rules(instance, class, schema, candidate_types, firings)?;
-            apply_type_join_rules(
-                instance,
-                class,
-                schema,
-                &known_indexes,
-                candidate_types,
-                candidate_properties,
-                firings,
-            )?;
-            if has_swrl {
-                let mut sink = SwrlSink {
+            let firings = &mut stats.rule_firings;
+            for result in MergeBinaryIter::new(delta_types.segment_iters()?)? {
+                let (instance, class) = result?;
+                store.derived_types_mut().push((instance, class))?;
+                apply_type_rules(instance, class, schema, candidate_types, firings)?;
+                apply_type_join_rules(
+                    instance,
+                    class,
+                    schema,
+                    &known_indexes,
                     candidate_types,
                     candidate_properties,
-                    different_pairs: swrl_state.different_pairs,
                     firings,
-                };
-                apply_swrl_type_rules(instance, class, schema, &swrl_ctx, &mut sink)?;
+                )?;
+                if has_swrl {
+                    let mut sink = SwrlSink {
+                        candidate_types,
+                        candidate_properties,
+                        different_pairs: swrl_state.different_pairs,
+                        firings,
+                    };
+                    apply_swrl_type_rules(instance, class, schema, &swrl_ctx, &mut sink)?;
+                }
             }
-        }
 
-        // Build a delta-only property index for delta⋈delta joins
-        let delta_prop_index = if needs_property_index {
-            let mut idx = PropertyIndex::new();
+            // Build a delta-only property index for delta⋈delta joins
+            let delta_prop_index = if needs_property_index {
+                let mut idx = PropertyIndex::new();
+                for result in MergeTernaryIter::new(delta_properties.segment_iters()?)? {
+                    let (s, p, o) = result?;
+                    if schema.indexed_predicates.contains(&p) {
+                        idx.insert(s, p, o);
+                    }
+                }
+                idx.dedup();
+                idx
+            } else {
+                PropertyIndex::new()
+            };
+            let delta_indexes = JoinIndexes {
+                types: &type_index,
+                properties: &delta_prop_index,
+            };
+
+            let firings = &mut stats.rule_firings;
+            for result in MergeTernaryIter::new(delta_properties.segment_iters()?)? {
+                let (subject, predicate, object) = result?;
+                store
+                    .derived_properties_mut()
+                    .push((subject, predicate, object))?;
+                apply_property_rules(
+                    subject,
+                    predicate,
+                    object,
+                    schema,
+                    candidate_types,
+                    candidate_properties,
+                    firings,
+                )?;
+                // delta ⋈ known joins
+                apply_property_join_rules(
+                    subject,
+                    predicate,
+                    object,
+                    schema,
+                    &known_indexes,
+                    candidate_types,
+                    candidate_properties,
+                    firings,
+                    &mut chain_bufs,
+                )?;
+                // delta ⋈ delta joins (property index only — type deltas already consumed above)
+                apply_property_join_rules(
+                    subject,
+                    predicate,
+                    object,
+                    schema,
+                    &delta_indexes,
+                    candidate_types,
+                    candidate_properties,
+                    firings,
+                    &mut chain_bufs,
+                )?;
+                if has_swrl {
+                    let mut sink = SwrlSink {
+                        candidate_types,
+                        candidate_properties,
+                        different_pairs: swrl_state.different_pairs,
+                        firings,
+                    };
+                    apply_swrl_property_rules(
+                        subject, predicate, object, schema, &swrl_ctx, &mut sink,
+                    )?;
+                }
+            }
+        } // immutable borrows of type_index/known_prop_index end here
+
+        // Incrementally update indexes with this iteration's deltas so they
+        // are ready for the next iteration.
+        if needs_type_index {
+            let mut dirty = Vec::new();
+            for result in MergeBinaryIter::new(delta_types.segment_iters()?)? {
+                let (instance, class) = result?;
+                if schema.indexed_classes.contains(&class) {
+                    type_index.insert(instance, class);
+                    dirty.push((instance, class));
+                }
+            }
+            type_index.dedup_keys(&dirty);
+        }
+        if needs_property_index {
+            let mut dirty = Vec::new();
             for result in MergeTernaryIter::new(delta_properties.segment_iters()?)? {
                 let (s, p, o) = result?;
                 if schema.indexed_predicates.contains(&p) {
-                    idx.insert(s, p, o);
+                    known_prop_index.insert(s, p, o);
+                    dirty.push((s, p, o));
                 }
             }
-            idx.dedup();
-            idx
-        } else {
-            PropertyIndex::new()
-        };
-        let delta_indexes = JoinIndexes {
-            types: &type_index,
-            properties: &delta_prop_index,
-        };
-
-        let firings = &mut stats.rule_firings;
-        for result in MergeTernaryIter::new(delta_properties.segment_iters()?)? {
-            let (subject, predicate, object) = result?;
-            store
-                .derived_properties_mut()
-                .push((subject, predicate, object))?;
-            apply_property_rules(
-                subject,
-                predicate,
-                object,
-                schema,
-                candidate_types,
-                candidate_properties,
-                firings,
-            )?;
-            // delta ⋈ known joins
-            apply_property_join_rules(
-                subject,
-                predicate,
-                object,
-                schema,
-                &known_indexes,
-                candidate_types,
-                candidate_properties,
-                firings,
-                &mut chain_bufs,
-            )?;
-            // delta ⋈ delta joins (property index only — type deltas already consumed above)
-            apply_property_join_rules(
-                subject,
-                predicate,
-                object,
-                schema,
-                &delta_indexes,
-                candidate_types,
-                candidate_properties,
-                firings,
-                &mut chain_bufs,
-            )?;
-            if has_swrl {
-                let mut sink = SwrlSink {
-                    candidate_types,
-                    candidate_properties,
-                    different_pairs: swrl_state.different_pairs,
-                    firings,
-                };
-                apply_swrl_property_rules(
-                    subject, predicate, object, schema, &swrl_ctx, &mut sink,
-                )?;
-            }
+            known_prop_index.dedup_keys(&dirty);
         }
     }
 
