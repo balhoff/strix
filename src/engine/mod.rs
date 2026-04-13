@@ -380,6 +380,28 @@ fn apply_property_rules(
 ///   - Transitive property chaining via PropertyIndex
 ///   - cls-svf1 (property-triggered): property(x,P,y) ∧ type(y,D) → type(x,C)
 ///   - cls-avf (property-triggered): property(x,P,y) ∧ type(x,A) → type(y,B)
+
+/// Reusable buffers for property chain backward/forward walks.
+/// Avoids per-fact heap allocation on a hot path.
+struct ChainBuffers {
+    /// Accumulates backward-walk start nodes; persists while forward walk runs.
+    starts: Vec<TermId>,
+    /// Current frontier during a walk step.
+    current: Vec<TermId>,
+    /// Next frontier being built during a walk step.
+    next: Vec<TermId>,
+}
+
+impl ChainBuffers {
+    fn new() -> Self {
+        Self {
+            starts: Vec::new(),
+            current: Vec::new(),
+            next: Vec::new(),
+        }
+    }
+}
+
 fn apply_property_join_rules(
     subject: TermId,
     predicate: TermId,
@@ -389,6 +411,7 @@ fn apply_property_join_rules(
     candidate_types: &mut BinaryRelation,
     candidate_properties: &mut TernaryRelation,
     firings: &mut RuleFirings,
+    chain_bufs: &mut ChainBuffers,
 ) -> Result<()> {
     if schema.is_transitive(predicate) {
         let fwd = indexes.properties.objects_for(predicate, object);
@@ -428,38 +451,46 @@ fn apply_property_join_rules(
             let (super_prop, chain) = &schema.property_chains[chain_idx];
 
             // Walk backward through positions 0..pos to collect chain start nodes
-            let mut starts = vec![subject];
+            chain_bufs.current.clear();
+            chain_bufs.current.push(subject);
             for &pred in chain[..pos].iter().rev() {
-                let mut next = Vec::new();
-                for &node in &starts {
-                    next.extend_from_slice(indexes.properties.subjects_for(pred, node));
+                chain_bufs.next.clear();
+                for &node in &chain_bufs.current {
+                    chain_bufs
+                        .next
+                        .extend_from_slice(indexes.properties.subjects_for(pred, node));
                 }
-                starts = next;
-                if starts.is_empty() {
+                std::mem::swap(&mut chain_bufs.current, &mut chain_bufs.next);
+                if chain_bufs.current.is_empty() {
                     break;
                 }
             }
-            if starts.is_empty() {
+            if chain_bufs.current.is_empty() {
                 continue;
             }
+            chain_bufs.starts.clear();
+            std::mem::swap(&mut chain_bufs.starts, &mut chain_bufs.current);
 
             // Walk forward through positions pos+1..n to collect chain end nodes
-            let mut ends = vec![object];
+            chain_bufs.current.clear();
+            chain_bufs.current.push(object);
             for &pred in &chain[pos + 1..] {
-                let mut next = Vec::new();
-                for &node in &ends {
-                    next.extend_from_slice(indexes.properties.objects_for(pred, node));
+                chain_bufs.next.clear();
+                for &node in &chain_bufs.current {
+                    chain_bufs
+                        .next
+                        .extend_from_slice(indexes.properties.objects_for(pred, node));
                 }
-                ends = next;
-                if ends.is_empty() {
+                std::mem::swap(&mut chain_bufs.current, &mut chain_bufs.next);
+                if chain_bufs.current.is_empty() {
                     break;
                 }
             }
 
-            let count = starts.len() * ends.len();
+            let count = chain_bufs.starts.len() * chain_bufs.current.len();
             firings.property_chain += count;
-            for &s in &starts {
-                for &e in &ends {
+            for &s in &chain_bufs.starts {
+                for &e in &chain_bufs.current {
                     candidate_properties.push((s, *super_prop, e))?;
                 }
             }
@@ -1301,6 +1332,8 @@ fn inner_fixpoint(
     let mut delta_properties =
         TernaryRelation::new(&work_dir, "engine-delta-props", relation_budget);
 
+    let mut chain_bufs = ChainBuffers::new();
+
     let needs_property_index = !schema.indexed_predicates.is_empty();
     let needs_type_index = !schema.indexed_classes.is_empty();
     let has_swrl = !schema.swrl_rules.is_empty();
@@ -1383,6 +1416,7 @@ fn inner_fixpoint(
                     candidate_types,
                     candidate_properties,
                     firings,
+                    &mut chain_bufs,
                 )?;
             }
             if has_swrl {
@@ -1540,6 +1574,7 @@ fn inner_fixpoint(
                 candidate_types,
                 candidate_properties,
                 firings,
+                &mut chain_bufs,
             )?;
             // delta ⋈ delta joins (property index only — type deltas already consumed above)
             apply_property_join_rules(
@@ -1551,6 +1586,7 @@ fn inner_fixpoint(
                 candidate_types,
                 candidate_properties,
                 firings,
+                &mut chain_bufs,
             )?;
             if has_swrl {
                 let mut sink = SwrlSink {
