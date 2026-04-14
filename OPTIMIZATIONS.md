@@ -34,6 +34,8 @@ Instead of writing deltas to disk and reading them back, apply rules inline duri
 
 **Impact**: Eliminates redundant file open overhead per iteration. Requires restructuring borrows so asserted iterators can be held while derived segments are mutated.
 
+**Tried**: Pre-inference compaction of asserted segments (read all + rewrite as single segment). Regressed both GO-CAM (+3s abox, +5s wall) and LUBM (+12s abox / 18%, +10s wall) because the upfront I/O of rewriting all asserted data far exceeds the per-iteration savings from fewer segment merges. A viable approach would need to avoid rewriting — e.g., memory-mapping the asserted segments, or reading them into in-memory sorted vecs once (trading memory for repeated file I/O).
+
 ## Engine: deduplicate universal_types candidates per individual
 
 When `universal_types` is non-empty (from `SubClassOf(owl:Thing, C)`), every individual emits `type(x, C)` for each fact it appears in — producing many duplicates that are later compacted and differenced away. A per-iteration `HashSet<TermId>` of already-seen individuals could skip redundant pushes, or a separate one-shot pass over distinct individuals could replace the per-fact emission.
