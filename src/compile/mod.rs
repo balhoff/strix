@@ -44,10 +44,13 @@ pub struct CompiledSchema {
     pub all_values_from_by_class: BTreeMap<TermId, Vec<(TermId, TermId)>>,
     /// prop → [(class, filler)] — cls-avf (property-triggered): property(x,P,y) → check type_index
     pub all_values_from_by_prop: BTreeMap<TermId, Vec<(TermId, TermId)>>,
-    /// intersection_class → [conjuncts] — cls-int2: type(x,C) → type(x,Ci)
-    pub intersection_conjuncts: BTreeMap<TermId, Vec<TermId>>,
-    /// conjunct → [intersection_classes] — cls-int1: check all conjuncts → type(x,C)
-    pub conjunct_of: BTreeMap<TermId, Vec<TermId>>,
+    /// All intersection rules: (super_class, [conjuncts]).
+    /// Multiple rules may share the same super_class.
+    pub intersection_rules: Vec<(TermId, Vec<TermId>)>,
+    /// super_class → [rule indices] — cls-int2: type(x,C) → type(x,Ci)
+    pub intersection_by_class: BTreeMap<TermId, Vec<usize>>,
+    /// conjunct → [rule indices] — cls-int1: check all conjuncts → type(x,C)
+    pub conjunct_of: BTreeMap<TermId, Vec<usize>>,
 
     // Equality-producing rules (Phase 2, Step 6)
     pub functional_properties: BTreeSet<TermId>,
@@ -169,7 +172,7 @@ impl CompiledSchema {
                 .values()
                 .map(|v| v.len())
                 .sum(),
-            intersection_rules: self.intersection_conjuncts.len(),
+            intersection_rules: self.intersection_rules.len(),
             max_cardinality_one_rules: self.max_card_one.len(),
             swrl_rules_compiled: self.swrl_rules.len(),
             indexed_predicates: self.indexed_predicates.len(),
@@ -220,7 +223,7 @@ impl CompiledSchema {
         if !self.all_values_from_by_class.is_empty() {
             active.push("all-values-from".to_string());
         }
-        if !self.intersection_conjuncts.is_empty() {
+        if !self.intersection_rules.is_empty() {
             active.push("intersection-of".to_string());
         }
         if !self.functional_properties.is_empty() {
@@ -325,8 +328,9 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId, rdfs_literal: TermI
     }
 
     // intersectionOf: remove owl:Thing from conjunct lists
-    let mut intersection_conjuncts: BTreeMap<TermId, Vec<TermId>> = BTreeMap::new();
-    let mut conjunct_of: BTreeMap<TermId, Vec<TermId>> = BTreeMap::new();
+    let mut intersection_rules: Vec<(TermId, Vec<TermId>)> = Vec::new();
+    let mut intersection_by_class: BTreeMap<TermId, Vec<usize>> = BTreeMap::new();
+    let mut conjunct_of: BTreeMap<TermId, Vec<usize>> = BTreeMap::new();
     for (class, conjuncts) in &schema.intersection_of {
         let filtered: Vec<TermId> = conjuncts
             .iter()
@@ -336,10 +340,12 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId, rdfs_literal: TermI
         if filtered.is_empty() {
             continue;
         }
-        intersection_conjuncts.insert(*class, filtered.clone());
+        let idx = intersection_rules.len();
+        intersection_by_class.entry(*class).or_default().push(idx);
         for &conjunct in &filtered {
-            conjunct_of.entry(conjunct).or_default().push(*class);
+            conjunct_of.entry(conjunct).or_default().push(idx);
         }
+        intersection_rules.push((*class, filtered));
     }
 
     // Domain/range: filter out owl:Thing / rdfs:Literal targets (trivially true)
@@ -416,7 +422,7 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId, rdfs_literal: TermI
     indexed_classes.extend(some_values_from_by_filler.keys());
     indexed_classes.extend(schema.has_key.iter().map(|(cls, _)| cls));
     indexed_classes.extend(all_values_from_by_class.keys());
-    indexed_classes.extend(intersection_conjuncts.values().flatten());
+    indexed_classes.extend(intersection_rules.iter().flat_map(|(_, cs)| cs.iter()));
 
     // Register SWRL-referenced predicates and classes for indexing
     for rule in &swrl.rules {
@@ -452,7 +458,8 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId, rdfs_literal: TermI
         some_values_from_by_filler,
         all_values_from_by_class,
         all_values_from_by_prop,
-        intersection_conjuncts,
+        intersection_rules,
+        intersection_by_class,
         conjunct_of,
         functional_properties: schema.functional_properties.clone(),
         inverse_functional_properties: schema.inverse_functional_properties.clone(),

@@ -2195,6 +2195,233 @@ SubClassOf(:B ObjectAllValuesFrom(:p :D))
     );
 }
 
+// ─── Delta ⋈ delta completeness ────────────────────────────────────────────
+//
+// These tests verify that join rules fire when BOTH inputs are derived in the
+// same fixpoint iteration (both in "delta"), so neither is yet in the "known"
+// indexes. The bug: the semi-naive loop processes delta types against known
+// property indexes and delta properties against known type indexes, but has no
+// cross-delta join, so inferences requiring a new type AND a new property from
+// the same iteration are permanently lost.
+
+#[test]
+fn svf_fires_when_type_and_property_both_derived_same_iteration() {
+    // SubClassOf(A, B) + SubPropertyOf(q, p) + SubClassOf(SVF(p, B), C)
+    //
+    // Seed derives type(y,B) via subclass AND property(x,p,y) via subproperty
+    // in the same iteration. cls-svf1 needs both: property(x,p,y) ∧ type(y,B) → type(x,C).
+    let inferred = reason(
+        "\
+<http://x.com/y> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .
+<http://x.com/x> <http://x.com/q> <http://x.com/y> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+Declaration(ObjectProperty(:q))
+Declaration(Class(:A))
+Declaration(Class(:B))
+Declaration(Class(:C))
+SubClassOf(:A :B)
+SubObjectPropertyOf(:q :p)
+SubClassOf(ObjectSomeValuesFrom(:p :B) :C)
+)",
+    );
+    assert!(
+        inferred.contains(
+            "<http://x.com/y> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> ."
+        ),
+        "subclass: {inferred}"
+    );
+    assert!(
+        inferred.contains("<http://x.com/x> <http://x.com/p> <http://x.com/y> ."),
+        "subproperty: {inferred}"
+    );
+    assert!(
+        inferred.contains(
+            "<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> ."
+        ),
+        "SVF must fire even when type(y,B) and property(x,p,y) are both delta: {inferred}"
+    );
+}
+
+#[test]
+fn avf_fires_when_type_and_property_both_derived_same_iteration() {
+    // SubClassOf(A, B) + SubPropertyOf(q, p) + SubClassOf(B, AVF(p, D))
+    //
+    // Seed derives type(x,B) via subclass AND property(x,p,y) via subproperty
+    // in the same iteration. cls-avf needs both: type(x,B) ∧ property(x,p,y) → type(y,D).
+    let inferred = reason(
+        "\
+<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .
+<http://x.com/x> <http://x.com/q> <http://x.com/y> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(ObjectProperty(:p))
+Declaration(ObjectProperty(:q))
+Declaration(Class(:A))
+Declaration(Class(:B))
+Declaration(Class(:D))
+SubClassOf(:A :B)
+SubObjectPropertyOf(:q :p)
+SubClassOf(:B ObjectAllValuesFrom(:p :D))
+)",
+    );
+    assert!(
+        inferred.contains(
+            "<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> ."
+        ),
+        "subclass: {inferred}"
+    );
+    assert!(
+        inferred.contains("<http://x.com/x> <http://x.com/p> <http://x.com/y> ."),
+        "subproperty: {inferred}"
+    );
+    assert!(
+        inferred.contains(
+            "<http://x.com/y> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/D> ."
+        ),
+        "AVF must fire even when type(x,B) and property(x,p,y) are both delta: {inferred}"
+    );
+}
+
+#[test]
+fn intersection_fires_when_both_conjuncts_derived_same_iteration() {
+    // SubClassOf(A, B) + SubClassOf(C, D) + SubClassOf(IntersectionOf(B, D), E)
+    //
+    // Seed derives type(x,B) and type(x,D) via subclass in the same iteration.
+    // cls-int1 needs both: type(x,B) ∧ type(x,D) → type(x,E).
+    let inferred = reason(
+        "\
+<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .
+<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:A))
+Declaration(Class(:B))
+Declaration(Class(:C))
+Declaration(Class(:D))
+Declaration(Class(:E))
+SubClassOf(:A :B)
+SubClassOf(:C :D)
+SubClassOf(ObjectIntersectionOf(:B :D) :E)
+)",
+    );
+    assert!(
+        inferred.contains(
+            "<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> ."
+        ),
+        "subclass A->B: {inferred}"
+    );
+    assert!(
+        inferred.contains(
+            "<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/D> ."
+        ),
+        "subclass C->D: {inferred}"
+    );
+    assert!(
+        inferred.contains(
+            "<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/E> ."
+        ),
+        "cls-int1 must fire even when both conjuncts B and D are delta: {inferred}"
+    );
+}
+
+// ─── Multiple intersection axioms per super class ──────────────────────────
+//
+// When two SubClassOf axioms target the same super class with different
+// intersection sub-expressions, both rules must fire independently.
+
+#[test]
+fn multiple_intersections_same_superclass_cls_int1() {
+    // SubClassOf(IntersectionOf(A, B), E)
+    // SubClassOf(IntersectionOf(C, D), E)
+    //
+    // x has types {A, B}, y has types {C, D}.
+    // Both intersection rules should fire: type(x, E) AND type(y, E).
+    let inferred = reason(
+        "\
+<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .
+<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> .
+<http://x.com/y> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> .
+<http://x.com/y> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/D> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:A))
+Declaration(Class(:B))
+Declaration(Class(:C))
+Declaration(Class(:D))
+Declaration(Class(:E))
+SubClassOf(ObjectIntersectionOf(:A :B) :E)
+SubClassOf(ObjectIntersectionOf(:C :D) :E)
+)",
+    );
+    let x_e = inferred.contains(
+        "<http://x.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/E> .",
+    );
+    let y_e = inferred.contains(
+        "<http://x.com/y> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/E> .",
+    );
+    assert!(
+        x_e && y_e,
+        "Both intersection rules must fire: type(x,E)={x_e}, type(y,E)={y_e}\n{inferred}"
+    );
+}
+
+#[test]
+fn multiple_intersections_same_superclass_cls_int2() {
+    // SubClassOf(IntersectionOf(A, B), E)
+    // SubClassOf(IntersectionOf(C, D), E)
+    //
+    // z has type E (asserted). cls-int2 should decompose into ALL conjuncts
+    // from BOTH intersection axioms: type(z, A), type(z, B), type(z, C), type(z, D).
+    let inferred = reason(
+        "\
+<http://x.com/z> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/E> .
+",
+        "\
+Prefix(:=<http://x.com/>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(<http://x.com/o>
+Declaration(Class(:A))
+Declaration(Class(:B))
+Declaration(Class(:C))
+Declaration(Class(:D))
+Declaration(Class(:E))
+SubClassOf(ObjectIntersectionOf(:A :B) :E)
+SubClassOf(ObjectIntersectionOf(:C :D) :E)
+)",
+    );
+    let has_a = inferred.contains(
+        "<http://x.com/z> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/A> .",
+    );
+    let has_b = inferred.contains(
+        "<http://x.com/z> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/B> .",
+    );
+    let has_c = inferred.contains(
+        "<http://x.com/z> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/C> .",
+    );
+    let has_d = inferred.contains(
+        "<http://x.com/z> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/D> .",
+    );
+    assert!(
+        has_a && has_b && has_c && has_d,
+        "cls-int2 must decompose all conjuncts from all intersection axioms: \
+         A={has_a}, B={has_b}, C={has_c}, D={has_d}\n{inferred}"
+    );
+}
+
 // ─── owl:Thing handling ─────────────────────────────────────────────────────
 
 #[test]

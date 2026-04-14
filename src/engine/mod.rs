@@ -77,6 +77,17 @@ impl PropertyIndex {
             .push(subject);
     }
 
+    fn insert_sorted(&mut self, subject: TermId, predicate: TermId, object: TermId) {
+        let fwd = self.by_pred_subj.entry((predicate, subject)).or_default();
+        if let Err(pos) = fwd.binary_search(&object) {
+            fwd.insert(pos, object);
+        }
+        let bwd = self.by_pred_obj.entry((predicate, object)).or_default();
+        if let Err(pos) = bwd.binary_search(&subject) {
+            bwd.insert(pos, subject);
+        }
+    }
+
     fn dedup(&mut self) {
         for values in self.by_pred_subj.values_mut() {
             values.sort_unstable();
@@ -85,20 +96,6 @@ impl PropertyIndex {
         for values in self.by_pred_obj.values_mut() {
             values.sort_unstable();
             values.dedup();
-        }
-    }
-
-    /// Sort and dedup only the entries that were touched by recent inserts.
-    fn dedup_keys(&mut self, dirty: &[(TermId, TermId, TermId)]) {
-        for &(s, p, o) in dirty {
-            if let Some(v) = self.by_pred_subj.get_mut(&(p, s)) {
-                v.sort_unstable();
-                v.dedup();
-            }
-            if let Some(v) = self.by_pred_obj.get_mut(&(p, o)) {
-                v.sort_unstable();
-                v.dedup();
-            }
         }
     }
 
@@ -170,6 +167,17 @@ impl TypeIndex {
         self.by_class.entry(class).or_default().push(instance);
     }
 
+    fn insert_sorted(&mut self, instance: TermId, class: TermId) {
+        let by_inst = self.by_instance.entry(instance).or_default();
+        if let Err(pos) = by_inst.binary_search(&class) {
+            by_inst.insert(pos, class);
+        }
+        let by_cls = self.by_class.entry(class).or_default();
+        if let Err(pos) = by_cls.binary_search(&instance) {
+            by_cls.insert(pos, instance);
+        }
+    }
+
     fn dedup(&mut self) {
         for values in self.by_instance.values_mut() {
             values.sort_unstable();
@@ -178,20 +186,6 @@ impl TypeIndex {
         for values in self.by_class.values_mut() {
             values.sort_unstable();
             values.dedup();
-        }
-    }
-
-    /// Sort and dedup only the entries that were touched by recent inserts.
-    fn dedup_keys(&mut self, dirty: &[(TermId, TermId)]) {
-        for &(instance, class) in dirty {
-            if let Some(v) = self.by_instance.get_mut(&instance) {
-                v.sort_unstable();
-                v.dedup();
-            }
-            if let Some(v) = self.by_class.get_mut(&class) {
-                v.sort_unstable();
-                v.dedup();
-            }
         }
     }
 
@@ -278,25 +272,27 @@ fn apply_type_join_rules(
     candidate_properties: &mut TernaryRelation,
     firings: &mut RuleFirings,
 ) -> Result<()> {
-    // cls-int2: type(x,C) where C is intersection → emit conjuncts
-    if let Some(conjuncts) = schema.intersection_conjuncts.get(&class) {
-        firings.intersection += conjuncts.len();
-        for &conjunct in conjuncts {
-            candidate_types.push((instance, conjunct))?;
+    // cls-int2: type(x,C) where C is intersection super → emit conjuncts from all rules
+    if let Some(rule_indices) = schema.intersection_by_class.get(&class) {
+        for &idx in rule_indices {
+            let (_, conjuncts) = &schema.intersection_rules[idx];
+            firings.intersection += conjuncts.len();
+            for &conjunct in conjuncts {
+                candidate_types.push((instance, conjunct))?;
+            }
         }
     }
 
     // cls-int1: type(x,D) where D is a conjunct → check all other conjuncts
-    if let Some(intersection_classes) = schema.conjunct_of.get(&class) {
-        for &int_class in intersection_classes {
-            if let Some(conjuncts) = schema.intersection_conjuncts.get(&int_class) {
-                let all_present = conjuncts
-                    .iter()
-                    .all(|&c| c == class || indexes.types.has_type(instance, c));
-                if all_present {
-                    firings.intersection += 1;
-                    candidate_types.push((instance, int_class))?;
-                }
+    if let Some(rule_indices) = schema.conjunct_of.get(&class) {
+        for &idx in rule_indices {
+            let (int_class, conjuncts) = &schema.intersection_rules[idx];
+            let all_present = conjuncts
+                .iter()
+                .all(|&c| c == class || indexes.types.has_type(instance, c));
+            if all_present {
+                firings.intersection += 1;
+                candidate_types.push((instance, *int_class))?;
             }
         }
     }
@@ -1520,14 +1516,34 @@ fn inner_fixpoint(
         delta_types.compact()?;
         delta_properties.compact()?;
 
-        // Indexes reflect the pre-delta state; updated after rule application.
+        // Merge this iteration's deltas into persistent indexes so that
+        // join lookups see known ∪ delta. This ensures multi-way joins
+        // (intersection conjuncts, property chain walks, SWRL body atoms)
+        // can find facts from both known and delta in a single pass.
+        if needs_type_index {
+            for result in MergeBinaryIter::new(delta_types.segment_iters()?)? {
+                let (instance, class) = result?;
+                if schema.indexed_classes.contains(&class) {
+                    type_index.insert_sorted(instance, class);
+                }
+            }
+        }
+        if needs_property_index {
+            for result in MergeTernaryIter::new(delta_properties.segment_iters()?)? {
+                let (s, p, o) = result?;
+                if schema.indexed_predicates.contains(&p) {
+                    known_prop_index.insert_sorted(s, p, o);
+                }
+            }
+        }
+
         {
-            let known_indexes = JoinIndexes {
+            let indexes = JoinIndexes {
                 types: &type_index,
                 properties: &known_prop_index,
             };
             let swrl_ctx = SwrlContext {
-                indexes: &known_indexes,
+                indexes: &indexes,
                 union_find: swrl_state.union_find,
                 different_pairs: different_pairs_set.clone(),
                 owl_same_as: swrl_state.owl_same_as,
@@ -1542,7 +1558,7 @@ fn inner_fixpoint(
                     instance,
                     class,
                     schema,
-                    &known_indexes,
+                    &indexes,
                     candidate_types,
                     candidate_properties,
                     firings,
@@ -1557,25 +1573,6 @@ fn inner_fixpoint(
                     apply_swrl_type_rules(instance, class, schema, &swrl_ctx, &mut sink)?;
                 }
             }
-
-            // Build a delta-only property index for delta⋈delta joins
-            let delta_prop_index = if needs_property_index {
-                let mut idx = PropertyIndex::new();
-                for result in MergeTernaryIter::new(delta_properties.segment_iters()?)? {
-                    let (s, p, o) = result?;
-                    if schema.indexed_predicates.contains(&p) {
-                        idx.insert(s, p, o);
-                    }
-                }
-                idx.dedup();
-                idx
-            } else {
-                PropertyIndex::new()
-            };
-            let delta_indexes = JoinIndexes {
-                types: &type_index,
-                properties: &delta_prop_index,
-            };
 
             let firings = &mut stats.rule_firings;
             for result in MergeTernaryIter::new(delta_properties.segment_iters()?)? {
@@ -1592,25 +1589,12 @@ fn inner_fixpoint(
                     candidate_properties,
                     firings,
                 )?;
-                // delta ⋈ known joins
                 apply_property_join_rules(
                     subject,
                     predicate,
                     object,
                     schema,
-                    &known_indexes,
-                    candidate_types,
-                    candidate_properties,
-                    firings,
-                    &mut chain_bufs,
-                )?;
-                // delta ⋈ delta joins (property index only — type deltas already consumed above)
-                apply_property_join_rules(
-                    subject,
-                    predicate,
-                    object,
-                    schema,
-                    &delta_indexes,
+                    &indexes,
                     candidate_types,
                     candidate_properties,
                     firings,
@@ -1628,31 +1612,6 @@ fn inner_fixpoint(
                     )?;
                 }
             }
-        } // immutable borrows of type_index/known_prop_index end here
-
-        // Incrementally update indexes with this iteration's deltas so they
-        // are ready for the next iteration.
-        if needs_type_index {
-            let mut dirty = Vec::new();
-            for result in MergeBinaryIter::new(delta_types.segment_iters()?)? {
-                let (instance, class) = result?;
-                if schema.indexed_classes.contains(&class) {
-                    type_index.insert(instance, class);
-                    dirty.push((instance, class));
-                }
-            }
-            type_index.dedup_keys(&dirty);
-        }
-        if needs_property_index {
-            let mut dirty = Vec::new();
-            for result in MergeTernaryIter::new(delta_properties.segment_iters()?)? {
-                let (s, p, o) = result?;
-                if schema.indexed_predicates.contains(&p) {
-                    known_prop_index.insert(s, p, o);
-                    dirty.push((s, p, o));
-                }
-            }
-            known_prop_index.dedup_keys(&dirty);
         }
     }
 
