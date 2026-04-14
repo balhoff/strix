@@ -1443,9 +1443,10 @@ pub fn materialize(
     let relation_budget = engine_budget / 4;
     let work_dir = store.work_dir().to_path_buf();
 
-    let mut candidate_types = BinaryRelation::new(&work_dir, "engine-cand-types", relation_budget);
+    let mut candidate_types =
+        BinaryRelation::with_compression(&work_dir, "engine-cand-types", relation_budget, false);
     let mut candidate_properties =
-        TernaryRelation::new(&work_dir, "engine-cand-props", relation_budget);
+        TernaryRelation::with_compression(&work_dir, "engine-cand-props", relation_budget, false);
     let mut union_find = UnionFind::new();
 
     // Seed from SameIndividual axioms (once, before the fixpoint loop).
@@ -1551,9 +1552,10 @@ fn inner_fixpoint(
     swrl_state: &mut SwrlState<'_>,
 ) -> Result<()> {
     let work_dir = store.work_dir().to_path_buf();
-    let mut delta_types = BinaryRelation::new(&work_dir, "engine-delta-types", relation_budget);
+    let mut delta_types =
+        BinaryRelation::with_compression(&work_dir, "engine-delta-types", relation_budget, false);
     let mut delta_properties =
-        TernaryRelation::new(&work_dir, "engine-delta-props", relation_budget);
+        TernaryRelation::with_compression(&work_dir, "engine-delta-props", relation_budget, false);
 
     let mut chain_bufs = ChainBuffers::new();
 
@@ -1693,9 +1695,6 @@ fn inner_fixpoint(
             anyhow::bail!("maximum iterations ({limit}) reached before fixpoint");
         }
         stats.iterations += 1;
-
-        candidate_types.compact()?;
-        candidate_properties.compact()?;
 
         delta_types.clear();
         delta_properties.clear();

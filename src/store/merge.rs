@@ -74,12 +74,12 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let p1 = dir.path().join("a.seg");
         let p2 = dir.path().join("b.seg");
-        write_binary_segment(&p1, &[(1, 2), (3, 4), (7, 8)]).unwrap();
-        write_binary_segment(&p2, &[(2, 3), (3, 4), (5, 6)]).unwrap();
+        write_binary_segment(&p1, &[(1, 2), (3, 4), (7, 8)], true).unwrap();
+        write_binary_segment(&p2, &[(2, 3), (3, 4), (5, 6)], true).unwrap();
 
         let iters = vec![
-            BinarySegmentIter::open(&p1).unwrap(),
-            BinarySegmentIter::open(&p2).unwrap(),
+            BinarySegmentIter::open(&p1, true).unwrap(),
+            BinarySegmentIter::open(&p2, true).unwrap(),
         ];
         let merged: Vec<_> = MergeBinaryIter::new(iters)
             .unwrap()
@@ -95,12 +95,12 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let p1 = dir.path().join("a.seg");
         let p2 = dir.path().join("b.seg");
-        write_ternary_segment(&p1, &[(1, 2, 3), (4, 5, 6)]).unwrap();
-        write_ternary_segment(&p2, &[(1, 2, 3), (7, 8, 9)]).unwrap();
+        write_ternary_segment(&p1, &[(1, 2, 3), (4, 5, 6)], true).unwrap();
+        write_ternary_segment(&p2, &[(1, 2, 3), (7, 8, 9)], true).unwrap();
 
         let iters = vec![
-            TernarySegmentIter::open(&p1).unwrap(),
-            TernarySegmentIter::open(&p2).unwrap(),
+            TernarySegmentIter::open(&p1, true).unwrap(),
+            TernarySegmentIter::open(&p2, true).unwrap(),
         ];
         let merged: Vec<_> = MergeTernaryIter::new(iters)
             .unwrap()
