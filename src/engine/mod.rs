@@ -51,6 +51,12 @@ pub struct MaterializeResult {
 ///
 /// Only indexes predicates listed in `CompiledSchema::indexed_predicates`
 /// (transitive, someValuesFrom, allValuesFrom properties).
+fn sorted_insert(vec: &mut Vec<TermId>, value: TermId) {
+    if let Err(pos) = vec.binary_search(&value) {
+        vec.insert(pos, value);
+    }
+}
+
 struct PropertyIndex {
     /// (predicate, subject) → sorted vec of objects
     by_pred_subj: BTreeMap<(TermId, TermId), Vec<TermId>>,
@@ -66,37 +72,9 @@ impl PropertyIndex {
         }
     }
 
-    fn insert(&mut self, subject: TermId, predicate: TermId, object: TermId) {
-        self.by_pred_subj
-            .entry((predicate, subject))
-            .or_default()
-            .push(object);
-        self.by_pred_obj
-            .entry((predicate, object))
-            .or_default()
-            .push(subject);
-    }
-
     fn insert_sorted(&mut self, subject: TermId, predicate: TermId, object: TermId) {
-        let fwd = self.by_pred_subj.entry((predicate, subject)).or_default();
-        if let Err(pos) = fwd.binary_search(&object) {
-            fwd.insert(pos, object);
-        }
-        let bwd = self.by_pred_obj.entry((predicate, object)).or_default();
-        if let Err(pos) = bwd.binary_search(&subject) {
-            bwd.insert(pos, subject);
-        }
-    }
-
-    fn dedup(&mut self) {
-        for values in self.by_pred_subj.values_mut() {
-            values.sort_unstable();
-            values.dedup();
-        }
-        for values in self.by_pred_obj.values_mut() {
-            values.sort_unstable();
-            values.dedup();
-        }
+        sorted_insert(self.by_pred_subj.entry((predicate, subject)).or_default(), object);
+        sorted_insert(self.by_pred_obj.entry((predicate, object)).or_default(), subject);
     }
 
     /// Objects z such that property(subject, predicate, z) is known.
@@ -134,10 +112,9 @@ fn build_property_index(store: &mut FactStore, schema: &CompiledSchema) -> Resul
     for result in store.known_properties_iter()? {
         let (subject, predicate, object) = result?;
         if schema.indexed_predicates.contains(&predicate) {
-            index.insert(subject, predicate, object);
+            index.insert_sorted(subject, predicate, object);
         }
     }
-    index.dedup();
     Ok(index)
 }
 
@@ -162,31 +139,9 @@ impl TypeIndex {
         }
     }
 
-    fn insert(&mut self, instance: TermId, class: TermId) {
-        self.by_instance.entry(instance).or_default().push(class);
-        self.by_class.entry(class).or_default().push(instance);
-    }
-
     fn insert_sorted(&mut self, instance: TermId, class: TermId) {
-        let by_inst = self.by_instance.entry(instance).or_default();
-        if let Err(pos) = by_inst.binary_search(&class) {
-            by_inst.insert(pos, class);
-        }
-        let by_cls = self.by_class.entry(class).or_default();
-        if let Err(pos) = by_cls.binary_search(&instance) {
-            by_cls.insert(pos, instance);
-        }
-    }
-
-    fn dedup(&mut self) {
-        for values in self.by_instance.values_mut() {
-            values.sort_unstable();
-            values.dedup();
-        }
-        for values in self.by_class.values_mut() {
-            values.sort_unstable();
-            values.dedup();
-        }
+        sorted_insert(self.by_instance.entry(instance).or_default(), class);
+        sorted_insert(self.by_class.entry(class).or_default(), instance);
     }
 
     /// Classes that instance belongs to (filtered to indexed classes).
@@ -217,10 +172,9 @@ fn build_type_index(store: &mut FactStore, schema: &CompiledSchema) -> Result<Ty
     for result in store.known_types_iter()? {
         let (instance, class) = result?;
         if schema.indexed_classes.contains(&class) {
-            index.insert(instance, class);
+            index.insert_sorted(instance, class);
         }
     }
-    index.dedup();
     Ok(index)
 }
 
@@ -1574,7 +1528,6 @@ fn inner_fixpoint(
                 }
             }
 
-            let firings = &mut stats.rule_firings;
             for result in MergeTernaryIter::new(delta_properties.segment_iters()?)? {
                 let (subject, predicate, object) = result?;
                 store
