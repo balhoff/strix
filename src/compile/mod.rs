@@ -92,6 +92,8 @@ pub struct CompiledSchema {
     pub swrl_by_type_trigger: BTreeMap<TermId, Vec<usize>>,
     /// predicate → [rule indices] — rules triggered by a PropertyAtom matching this predicate
     pub swrl_by_prop_trigger: BTreeMap<TermId, Vec<usize>>,
+    /// rule indices whose trigger is SameIndividualAtom or DifferentIndividualsAtom
+    pub swrl_equality_triggered: Vec<usize>,
 
     /// Predicates that require in-memory indexing for join evaluation.
     pub indexed_predicates: BTreeSet<TermId>,
@@ -488,6 +490,7 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId, rdfs_literal: TermI
         swrl_rules: swrl.rules,
         swrl_by_type_trigger: swrl.by_type_trigger,
         swrl_by_prop_trigger: swrl.by_prop_trigger,
+        swrl_equality_triggered: swrl.equality_triggered,
         indexed_predicates,
         indexed_classes,
         schema_iterations: subclass_iterations.max(subproperty_iterations),
@@ -501,6 +504,7 @@ struct CompiledSwrlRules {
     rules: Vec<CompiledSwrlRule>,
     by_type_trigger: BTreeMap<TermId, Vec<usize>>,
     by_prop_trigger: BTreeMap<TermId, Vec<usize>>,
+    equality_triggered: Vec<usize>,
 }
 
 /// Compile raw SWRL rules into evaluated form, returning rules and trigger indexes.
@@ -508,6 +512,7 @@ fn compile_swrl_rules(schema: &RawSchema) -> CompiledSwrlRules {
     let mut rules = Vec::new();
     let mut by_type: BTreeMap<TermId, Vec<usize>> = BTreeMap::new();
     let mut by_prop: BTreeMap<TermId, Vec<usize>> = BTreeMap::new();
+    let mut equality_triggered: Vec<usize> = Vec::new();
 
     for raw in &schema.swrl_rules {
         let mut var_map: BTreeMap<TermId, u32> = BTreeMap::new();
@@ -605,7 +610,9 @@ fn compile_swrl_rules(schema: &RawSchema) -> CompiledSwrlRules {
                     by_prop.entry(*property).or_default().push(idx);
                 }
                 SwrlBodyAtom::SameIndividualAtom { .. }
-                | SwrlBodyAtom::DifferentIndividualsAtom { .. } => {}
+                | SwrlBodyAtom::DifferentIndividualsAtom { .. } => {
+                    equality_triggered.push(idx);
+                }
             }
             rules.push(CompiledSwrlRule {
                 trigger,
@@ -621,6 +628,7 @@ fn compile_swrl_rules(schema: &RawSchema) -> CompiledSwrlRules {
         rules,
         by_type_trigger: by_type,
         by_prop_trigger: by_prop,
+        equality_triggered,
     }
 }
 
@@ -632,13 +640,17 @@ fn compile_swrl_rules(schema: &RawSchema) -> CompiledSwrlRules {
 fn select_trigger(body: &[SwrlBodyAtom]) -> usize {
     let mut bound: u64 = 0;
     let mut best = 0;
-    let mut best_score: (usize, bool) = (0, false);
+    let mut best_score: (bool, usize, bool) = (false, 0, false);
 
     for (i, atom) in body.iter().enumerate() {
         let var_mask = atom_var_mask(atom);
         let new = (var_mask & !bound).count_ones() as usize;
         let is_prop = matches!(atom, SwrlBodyAtom::PropertyAtom { .. });
-        let score = (new, is_prop);
+        let is_dispatchable = !matches!(
+            atom,
+            SwrlBodyAtom::SameIndividualAtom { .. } | SwrlBodyAtom::DifferentIndividualsAtom { .. }
+        );
+        let score = (is_dispatchable, new, is_prop);
         if score > best_score {
             best_score = score;
             best = i;

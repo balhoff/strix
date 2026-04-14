@@ -3989,6 +3989,150 @@ fn swrl_different_individuals_head_inconsistency() {
 }
 
 #[test]
+fn swrl_same_individual_atom_trigger_fires() {
+    // SameIndividual(:a :b) ∧ SameIndividualAtom(?x,?y) ∧ A(?x) → B(?y)
+    // The compiler may select SameIndividualAtom as the trigger because it
+    // binds two fresh variables.  If so, the rule is never dispatched because
+    // the engine only triggers SWRL from type/property deltas.
+    let inferred = reason(
+        "<http://example.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/A> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Prefix(owl:=<http://www.w3.org/2002/07/owl#>)\n\
+         Ontology(\n\
+           Declaration(Class(:A))\n\
+           Declaration(Class(:B))\n\
+           SameIndividual(:a :b)\n\
+           DLSafeRule(\n\
+             Body(\n\
+               SameIndividualAtom(Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>))\n\
+               ClassAtom(:A Variable(<urn:swrl:var#x>))\n\
+             )\n\
+             Head(ClassAtom(:B Variable(<urn:swrl:var#y>)))\n\
+           )\n\
+         )",
+    );
+    assert!(
+        inferred.contains("<http://example.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/B> .")
+        || inferred.contains("<http://example.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/B> ."),
+        "SWRL rule with SameIndividualAtom in body should infer B for the equal individual: {inferred}"
+    );
+}
+
+#[test]
+fn swrl_derived_different_individuals_visible_in_body() {
+    // Rule 1: P(?x,?y) → DifferentIndividuals(?x,?y)
+    // Rule 2: P(?x,?y) ∧ DifferentIndividuals(?x,?y) → C(?x)
+    //
+    // Rule 1 derives differentness, but the engine only consults ontology-declared
+    // pairs when evaluating DifferentIndividualsAtom in SWRL bodies—SWRL-derived
+    // pairs are accumulated separately for post-fixpoint inconsistency reporting.
+    // So rule 2 never fires.
+    let inferred = reason(
+        "<http://example.com/a> <http://example.com/P> <http://example.com/b> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Ontology(\n\
+           Declaration(ObjectProperty(:P))\n\
+           Declaration(Class(:C))\n\
+           DLSafeRule(\n\
+             Body(ObjectPropertyAtom(:P Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>)))\n\
+             Head(DifferentIndividualsAtom(Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>)))\n\
+           )\n\
+           DLSafeRule(\n\
+             Body(\n\
+               ObjectPropertyAtom(:P Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>))\n\
+               DifferentIndividualsAtom(Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>))\n\
+             )\n\
+             Head(ClassAtom(:C Variable(<urn:swrl:var#x>)))\n\
+           )\n\
+         )",
+    );
+    assert!(
+        inferred.contains("<http://example.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/C> ."),
+        "SWRL rule chaining DifferentIndividuals derivation into body atom should infer C(a): {inferred}"
+    );
+}
+
+#[test]
+fn swrl_equality_only_body_fires() {
+    // SameIndividualAtom(?x,?y) → B(?x)
+    // Body has only a SameIndividualAtom — no class/property atoms to serve as trigger.
+    // The rule must be dispatched via apply_swrl_equality_rules.
+    let inferred = reason(
+        "<http://example.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/A> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Prefix(owl:=<http://www.w3.org/2002/07/owl#>)\n\
+         Ontology(\n\
+           Declaration(Class(:A))\n\
+           Declaration(Class(:B))\n\
+           SameIndividual(:a :b)\n\
+           DLSafeRule(\n\
+             Body(SameIndividualAtom(Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>)))\n\
+             Head(ClassAtom(:B Variable(<urn:swrl:var#x>)))\n\
+           )\n\
+         )",
+    );
+    assert!(
+        inferred.contains("<http://example.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/B> .")
+        || inferred.contains("<http://example.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/B> ."),
+        "SWRL rule with only SameIndividualAtom body should fire for equality-class members: {inferred}"
+    );
+}
+
+#[test]
+fn swrl_equality_trigger_enumerates_all_pairs_in_large_class() {
+    // SameIndividual(:a :b :c) with DLSafeRule(Body(SameIndividualAtom(?x ?y)) Head(ObjectPropertyAtom(:R ?x ?y)))
+    // For the equivalence class {a,b,c}, the rule should fire for all 6 ordered
+    // pairs: (a,b),(b,a),(a,c),(c,a),(b,c),(c,b). A bug that only enumerates
+    // root/member pairs would miss (b,c) and (c,b).
+    let inferred = reason(
+        "",
+        "Prefix(:=<http://example.com/>)\n\
+         Prefix(owl:=<http://www.w3.org/2002/07/owl#>)\n\
+         Ontology(\n\
+           Declaration(ObjectProperty(:R))\n\
+           SameIndividual(:a :b :c)\n\
+           DLSafeRule(\n\
+             Body(SameIndividualAtom(Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>)))\n\
+             Head(ObjectPropertyAtom(:R Variable(<urn:swrl:var#x>) Variable(<urn:swrl:var#y>)))\n\
+           )\n\
+         )",
+    );
+    assert!(
+        inferred.contains("<http://example.com/b> <http://example.com/R> <http://example.com/c>"),
+        "Should infer R(b,c) for non-root pair in 3-member equivalence class: {inferred}"
+    );
+    assert!(
+        inferred.contains("<http://example.com/c> <http://example.com/R> <http://example.com/b>"),
+        "Should infer R(c,b) for non-root pair in 3-member equivalence class: {inferred}"
+    );
+}
+
+#[test]
+fn swrl_equality_trigger_with_constant_does_not_panic() {
+    // SameIndividualAtom(:a ?y) → B(?y)
+    // The trigger atom has a constant on the left side. apply_swrl_equality_rules
+    // must handle constants instead of panicking via var_index/unreachable!().
+    let inferred = reason(
+        "",
+        "Prefix(:=<http://example.com/>)\n\
+         Prefix(owl:=<http://www.w3.org/2002/07/owl#>)\n\
+         Ontology(\n\
+           Declaration(Class(:B))\n\
+           SameIndividual(:a :b)\n\
+           DLSafeRule(\n\
+             Body(SameIndividualAtom(:a Variable(<urn:swrl:var#y>)))\n\
+             Head(ClassAtom(:B Variable(<urn:swrl:var#y>)))\n\
+           )\n\
+         )",
+    );
+    assert!(
+        inferred.contains("<http://example.com/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/B>")
+        || inferred.contains("<http://example.com/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/B>"),
+        "SameIndividualAtom with constant should infer B for equal individuals: {inferred}"
+    );
+}
+
+#[test]
 fn swrl_chained_inference() {
     // C(?x) → D(?x), D(?x) → E(?x) — two SWRL rules chaining
     let inferred = reason(

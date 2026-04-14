@@ -385,12 +385,21 @@ fn check_different_individuals(
     union_find: &mut UnionFind,
     results: &mut Vec<Inconsistency>,
 ) {
+    let mut seen = BTreeSet::new();
     for &(a, b) in different_pairs {
-        if union_find.canonical(a) == union_find.canonical(b) {
-            results.push(Inconsistency::DifferentIndividuals {
-                individual_a: a,
-                individual_b: b,
-            });
+        if a == b {
+            continue;
+        }
+        let ca = union_find.canonical(a);
+        let cb = union_find.canonical(b);
+        if ca == cb {
+            let normalized = if a < b { (a, b) } else { (b, a) };
+            if seen.insert(normalized) {
+                results.push(Inconsistency::DifferentIndividuals {
+                    individual_a: normalized.0,
+                    individual_b: normalized.1,
+                });
+            }
         }
     }
 }

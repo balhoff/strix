@@ -87,6 +87,11 @@ impl UnionFind {
         self.find(x)
     }
 
+    /// All terms known to the union-find (i.e. that have been part of at least one union).
+    pub fn known_terms(&self) -> impl Iterator<Item = &TermId> {
+        self.parent.keys()
+    }
+
     /// Whether any non-trivial equivalence classes exist.
     pub fn has_merges(&self) -> bool {
         self.parent.iter().any(|(k, v)| k != v)

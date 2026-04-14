@@ -1,6 +1,7 @@
 pub mod inconsistency;
 pub mod sameas;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::compile::CompiledSchema;
@@ -484,7 +485,8 @@ fn apply_property_join_rules(
 struct SwrlContext<'a> {
     indexes: &'a JoinIndexes<'a>,
     union_find: &'a UnionFind,
-    different_pairs: BTreeSet<(TermId, TermId)>,
+    different_pairs: &'a RefCell<BTreeSet<(TermId, TermId)>>,
+    equality_class_index: BTreeMap<TermId, Vec<TermId>>,
     owl_same_as: TermId,
 }
 
@@ -508,31 +510,32 @@ fn apply_swrl_type_rules(
         Some(indices) => indices,
         None => return Ok(()),
     };
-    for &rule_idx in rule_indices {
-        let rule = &schema.swrl_rules[rule_idx];
-        let mut bindings = vec![None; rule.num_vars as usize];
+    loop {
+        let prev_diff_count = ctx.different_pairs.borrow().len();
 
-        if let SwrlBodyAtom::ClassAtom { arg, .. } = &rule.body[rule.trigger] {
-            bind_arg(*arg, instance, &mut bindings);
+        for &rule_idx in rule_indices {
+            let rule = &schema.swrl_rules[rule_idx];
+            let mut bindings = vec![None; rule.num_vars as usize];
+
+            if let SwrlBodyAtom::ClassAtom { arg, .. } = &rule.body[rule.trigger] {
+                bind_arg(*arg, instance, &mut bindings);
+            }
+
+            resolve_body(
+                &rule.body,
+                &rule.remaining,
+                &mut bindings,
+                ctx,
+                &mut |bindings| {
+                    sink.firings.swrl += 1;
+                    let _ = emit_head(&rule.head, bindings, ctx, sink);
+                },
+            );
         }
 
-        resolve_body(
-            &rule.body,
-            &rule.remaining,
-            &mut bindings,
-            ctx,
-            &mut |bindings| {
-                sink.firings.swrl += 1;
-                let _ = emit_head(
-                    &rule.head,
-                    bindings,
-                    ctx.owl_same_as,
-                    sink.candidate_types,
-                    sink.candidate_properties,
-                    sink.different_pairs,
-                );
-            },
-        );
+        if ctx.different_pairs.borrow().len() == prev_diff_count {
+            break;
+        }
     }
     Ok(())
 }
@@ -550,37 +553,38 @@ fn apply_swrl_property_rules(
         Some(indices) => indices,
         None => return Ok(()),
     };
-    for &rule_idx in rule_indices {
-        let rule = &schema.swrl_rules[rule_idx];
-        let mut bindings = vec![None; rule.num_vars as usize];
+    loop {
+        let prev_diff_count = ctx.different_pairs.borrow().len();
 
-        if let SwrlBodyAtom::PropertyAtom {
-            subject: s_arg,
-            object: o_arg,
-            ..
-        } = &rule.body[rule.trigger]
-        {
-            bind_arg(*s_arg, subject, &mut bindings);
-            bind_arg(*o_arg, object, &mut bindings);
+        for &rule_idx in rule_indices {
+            let rule = &schema.swrl_rules[rule_idx];
+            let mut bindings = vec![None; rule.num_vars as usize];
+
+            if let SwrlBodyAtom::PropertyAtom {
+                subject: s_arg,
+                object: o_arg,
+                ..
+            } = &rule.body[rule.trigger]
+            {
+                bind_arg(*s_arg, subject, &mut bindings);
+                bind_arg(*o_arg, object, &mut bindings);
+            }
+
+            resolve_body(
+                &rule.body,
+                &rule.remaining,
+                &mut bindings,
+                ctx,
+                &mut |bindings| {
+                    sink.firings.swrl += 1;
+                    let _ = emit_head(&rule.head, bindings, ctx, sink);
+                },
+            );
         }
 
-        resolve_body(
-            &rule.body,
-            &rule.remaining,
-            &mut bindings,
-            ctx,
-            &mut |bindings| {
-                sink.firings.swrl += 1;
-                let _ = emit_head(
-                    &rule.head,
-                    bindings,
-                    ctx.owl_same_as,
-                    sink.candidate_types,
-                    sink.candidate_properties,
-                    sink.different_pairs,
-                );
-            },
-        );
+        if ctx.different_pairs.borrow().len() == prev_diff_count {
+            break;
+        }
     }
     Ok(())
 }
@@ -588,6 +592,225 @@ fn apply_swrl_property_rules(
 fn bind_arg(arg: SwrlArg, value: TermId, bindings: &mut [Option<TermId>]) {
     if let SwrlArg::Variable(v) = arg {
         bindings[v as usize] = Some(value);
+    }
+}
+
+/// Build an immutable index of equivalence classes: root → [all members].
+fn build_equality_class_index(uf: &UnionFind) -> BTreeMap<TermId, Vec<TermId>> {
+    let mut index: BTreeMap<TermId, Vec<TermId>> = BTreeMap::new();
+    for &term in uf.known_terms() {
+        let root = uf.find_immutable(term);
+        index.entry(root).or_default().push(term);
+    }
+    index.retain(|_, members| members.len() > 1);
+    index
+}
+
+/// Apply SWRL rules whose trigger is SameIndividualAtom or DifferentIndividualsAtom.
+///
+/// These rules can't be dispatched from type/property deltas, so we enumerate
+/// all known equality/difference pairs and bind the trigger variables directly.
+fn apply_swrl_equality_rules(
+    schema: &CompiledSchema,
+    ctx: &SwrlContext<'_>,
+    sink: &mut SwrlSink<'_>,
+) -> Result<()> {
+    if schema.swrl_equality_triggered.is_empty() {
+        return Ok(());
+    }
+
+    loop {
+        let prev_diff_count = ctx.different_pairs.borrow().len();
+
+        for &rule_idx in &schema.swrl_equality_triggered {
+            let rule = &schema.swrl_rules[rule_idx];
+            let mut bindings = vec![None; rule.num_vars as usize];
+
+            match &rule.body[rule.trigger] {
+                SwrlBodyAtom::SameIndividualAtom { left, right } => {
+                    let l_const = resolve_arg(*left, &bindings);
+                    let r_const = resolve_arg(*right, &bindings);
+                    let l_var = left.as_variable().map(|v| v as usize);
+                    let r_var = right.as_variable().map(|v| v as usize);
+
+                    match (l_const, r_const) {
+                        (Some(lv), Some(rv)) => {
+                            // Both sides constant — just check if they're in the same class.
+                            if ctx.union_find.find_immutable(lv)
+                                == ctx.union_find.find_immutable(rv)
+                            {
+                                resolve_body(
+                                    &rule.body,
+                                    &rule.remaining,
+                                    &mut bindings,
+                                    ctx,
+                                    &mut |bindings| {
+                                        sink.firings.swrl += 1;
+                                        let _ = emit_head(&rule.head, bindings, ctx, sink);
+                                    },
+                                );
+                            }
+                        }
+                        (Some(bound), None) | (None, Some(bound)) => {
+                            let var = if l_const.is_some() {
+                                r_var.unwrap()
+                            } else {
+                                l_var.unwrap()
+                            };
+                            let root = ctx.union_find.find_immutable(bound);
+                            if let Some(members) = ctx.equality_class_index.get(&root) {
+                                for &m in members {
+                                    bindings[var] = Some(m);
+                                    resolve_body(
+                                        &rule.body,
+                                        &rule.remaining,
+                                        &mut bindings,
+                                        ctx,
+                                        &mut |bindings| {
+                                            sink.firings.swrl += 1;
+                                            let _ =
+                                                emit_head(&rule.head, bindings, ctx, sink);
+                                        },
+                                    );
+                                }
+                                bindings[var] = None;
+                            }
+                        }
+                        (None, None) => {
+                            let lv = l_var.unwrap();
+                            let rv = r_var.unwrap();
+                            for members in ctx.equality_class_index.values() {
+                                for (i, &a) in members.iter().enumerate() {
+                                    for &b in &members[i + 1..] {
+                                        bindings[lv] = Some(a);
+                                        bindings[rv] = Some(b);
+                                        resolve_body(
+                                            &rule.body,
+                                            &rule.remaining,
+                                            &mut bindings,
+                                            ctx,
+                                            &mut |bindings| {
+                                                sink.firings.swrl += 1;
+                                                let _ = emit_head(
+                                                    &rule.head, bindings, ctx, sink,
+                                                );
+                                            },
+                                        );
+                                        bindings[lv] = Some(b);
+                                        bindings[rv] = Some(a);
+                                        resolve_body(
+                                            &rule.body,
+                                            &rule.remaining,
+                                            &mut bindings,
+                                            ctx,
+                                            &mut |bindings| {
+                                                sink.firings.swrl += 1;
+                                                let _ = emit_head(
+                                                    &rule.head, bindings, ctx, sink,
+                                                );
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                            bindings[lv] = None;
+                            bindings[rv] = None;
+                        }
+                    }
+                }
+                SwrlBodyAtom::DifferentIndividualsAtom { left, right } => {
+                    let l_const = resolve_arg(*left, &bindings);
+                    let r_const = resolve_arg(*right, &bindings);
+                    let l_var = left.as_variable().map(|v| v as usize);
+                    let r_var = right.as_variable().map(|v| v as usize);
+                    let pairs: Vec<(TermId, TermId)> =
+                        ctx.different_pairs.borrow().iter().copied().collect();
+
+                    match (l_const, r_const) {
+                        (Some(lv), Some(rv)) => {
+                            if pairs.contains(&(lv, rv)) {
+                                resolve_body(
+                                    &rule.body,
+                                    &rule.remaining,
+                                    &mut bindings,
+                                    ctx,
+                                    &mut |bindings| {
+                                        sink.firings.swrl += 1;
+                                        let _ = emit_head(&rule.head, bindings, ctx, sink);
+                                    },
+                                );
+                            }
+                        }
+                        (Some(bound), None) | (None, Some(bound)) => {
+                            let var = if l_const.is_some() {
+                                r_var.unwrap()
+                            } else {
+                                l_var.unwrap()
+                            };
+                            let partners: Vec<TermId> = pairs
+                                .iter()
+                                .filter_map(|&(a, b)| {
+                                    if l_const.is_some() && a == bound {
+                                        Some(b)
+                                    } else if r_const.is_some() && b == bound {
+                                        Some(a)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            for partner in partners {
+                                bindings[var] = Some(partner);
+                                resolve_body(
+                                    &rule.body,
+                                    &rule.remaining,
+                                    &mut bindings,
+                                    ctx,
+                                    &mut |bindings| {
+                                        sink.firings.swrl += 1;
+                                        let _ = emit_head(&rule.head, bindings, ctx, sink);
+                                    },
+                                );
+                            }
+                            bindings[var] = None;
+                        }
+                        (None, None) => {
+                            let lv = l_var.unwrap();
+                            let rv = r_var.unwrap();
+                            for (a, b) in pairs {
+                                bindings[lv] = Some(a);
+                                bindings[rv] = Some(b);
+                                resolve_body(
+                                    &rule.body,
+                                    &rule.remaining,
+                                    &mut bindings,
+                                    ctx,
+                                    &mut |bindings| {
+                                        sink.firings.swrl += 1;
+                                        let _ = emit_head(&rule.head, bindings, ctx, sink);
+                                    },
+                                );
+                            }
+                            bindings[lv] = None;
+                            bindings[rv] = None;
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        if ctx.different_pairs.borrow().len() == prev_diff_count {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn var_index(arg: SwrlArg) -> usize {
+    match arg {
+        SwrlArg::Variable(v) => v as usize,
+        SwrlArg::Constant(_) => unreachable!(),
     }
 }
 
@@ -704,9 +927,18 @@ fn resolve_body(
                         resolve_body(all_atoms, rest, bindings, ctx, callback);
                     }
                 }
-                _ => {
-                    // SameIndividualAtom with unbound variable can't be efficiently resolved
+                (Some(bound), None) | (None, Some(bound)) => {
+                    let var = var_index(if l.is_some() { *right } else { *left });
+                    let root = ctx.union_find.find_immutable(bound);
+                    if let Some(members) = ctx.equality_class_index.get(&root) {
+                        for &member in members {
+                            bindings[var] = Some(member);
+                            resolve_body(all_atoms, rest, bindings, ctx, callback);
+                        }
+                        bindings[var] = None;
+                    }
                 }
+                (None, None) => {}
             }
         }
         SwrlBodyAtom::DifferentIndividualsAtom { left, right } => {
@@ -714,13 +946,25 @@ fn resolve_body(
             let r = resolve_arg(*right, bindings);
             match (l, r) {
                 (Some(lv), Some(rv)) => {
-                    if ctx.different_pairs.contains(&(lv, rv)) {
+                    if ctx.different_pairs.borrow().contains(&(lv, rv)) {
                         resolve_body(all_atoms, rest, bindings, ctx, callback);
                     }
                 }
-                _ => {
-                    // DifferentIndividualsAtom with unbound variable can't be efficiently resolved
+                (Some(bound), None) | (None, Some(bound)) => {
+                    let var = var_index(if l.is_some() { *right } else { *left });
+                    let partners: Vec<TermId> = ctx
+                        .different_pairs
+                        .borrow()
+                        .range((bound, TermId::MIN)..=(bound, TermId::MAX))
+                        .map(|&(_, partner)| partner)
+                        .collect();
+                    for partner in partners {
+                        bindings[var] = Some(partner);
+                        resolve_body(all_atoms, rest, bindings, ctx, callback);
+                    }
+                    bindings[var] = None;
                 }
+                (None, None) => {}
             }
         }
     }
@@ -730,15 +974,13 @@ fn resolve_body(
 fn emit_head(
     head: &SwrlHeadAtom,
     bindings: &[Option<TermId>],
-    owl_same_as: TermId,
-    candidate_types: &mut BinaryRelation,
-    candidate_properties: &mut TernaryRelation,
-    swrl_different_pairs: &mut Vec<(TermId, TermId)>,
+    ctx: &SwrlContext<'_>,
+    sink: &mut SwrlSink<'_>,
 ) -> Result<()> {
     match head {
         SwrlHeadAtom::ClassAtom { class, arg } => {
             if let Some(instance) = resolve_arg(*arg, bindings) {
-                candidate_types.push((instance, *class))?;
+                sink.candidate_types.push((instance, *class))?;
             }
         }
         SwrlHeadAtom::PropertyAtom {
@@ -750,21 +992,24 @@ fn emit_head(
                 resolve_arg(*subject, bindings),
                 resolve_arg(*object, bindings),
             ) {
-                candidate_properties.push((s, *property, o))?;
+                sink.candidate_properties.push((s, *property, o))?;
             }
         }
         SwrlHeadAtom::SameIndividualAtom { left, right } => {
             if let (Some(l), Some(r)) =
                 (resolve_arg(*left, bindings), resolve_arg(*right, bindings))
             {
-                candidate_properties.push((l, owl_same_as, r))?;
+                sink.candidate_properties.push((l, ctx.owl_same_as, r))?;
             }
         }
         SwrlHeadAtom::DifferentIndividualsAtom { left, right } => {
             if let (Some(l), Some(r)) =
                 (resolve_arg(*left, bindings), resolve_arg(*right, bindings))
             {
-                swrl_different_pairs.push((l, r));
+                sink.different_pairs.push((l, r));
+                let mut set = ctx.different_pairs.borrow_mut();
+                set.insert((l, r));
+                set.insert((r, l));
             }
         }
     }
@@ -1319,12 +1564,16 @@ fn inner_fixpoint(
     let needs_seed_join_pass =
         needs_property_index || needs_type_index || !schema.has_value_by_class.is_empty();
 
-    // Pre-build symmetric set of different-individual pairs for O(log n) lookup.
-    let different_pairs_set: BTreeSet<(TermId, TermId)> = schema
-        .different_individual_pairs
-        .iter()
-        .flat_map(|&(a, b)| [(a, b), (b, a)])
-        .collect();
+    // Symmetric set of different-individual pairs for O(log n) lookup.
+    // Wrapped in RefCell so SWRL body resolution (reads) and head emission
+    // (writes) can share it during recursive rule evaluation.
+    let different_pairs_set: RefCell<BTreeSet<(TermId, TermId)>> = RefCell::new(
+        schema
+            .different_individual_pairs
+            .iter()
+            .flat_map(|&(a, b)| [(a, b), (b, a)])
+            .collect(),
+    );
 
     let firings = &mut stats.rule_firings;
 
@@ -1365,7 +1614,8 @@ fn inner_fixpoint(
         let swrl_ctx = SwrlContext {
             indexes: &seed_indexes,
             union_find: swrl_state.union_find,
-            different_pairs: different_pairs_set.clone(),
+            different_pairs: &different_pairs_set,
+            equality_class_index: build_equality_class_index(swrl_state.union_find),
             owl_same_as: swrl_state.owl_same_as,
         };
 
@@ -1418,6 +1668,17 @@ fn inner_fixpoint(
                     subject, predicate, object, schema, &swrl_ctx, &mut sink,
                 )?;
             }
+        }
+
+        // Evaluate SWRL rules triggered by equality/difference atoms.
+        {
+            let mut sink = SwrlSink {
+                candidate_types,
+                candidate_properties,
+                different_pairs: swrl_state.different_pairs,
+                firings,
+            };
+            apply_swrl_equality_rules(schema, &swrl_ctx, &mut sink)?;
         }
     }
 
@@ -1499,7 +1760,8 @@ fn inner_fixpoint(
             let swrl_ctx = SwrlContext {
                 indexes: &indexes,
                 union_find: swrl_state.union_find,
-                different_pairs: different_pairs_set.clone(),
+                different_pairs: &different_pairs_set,
+                equality_class_index: build_equality_class_index(swrl_state.union_find),
                 owl_same_as: swrl_state.owl_same_as,
             };
 
@@ -1564,6 +1826,17 @@ fn inner_fixpoint(
                         subject, predicate, object, schema, &swrl_ctx, &mut sink,
                     )?;
                 }
+            }
+
+            // Evaluate SWRL rules triggered by equality/difference atoms.
+            {
+                let mut sink = SwrlSink {
+                    candidate_types,
+                    candidate_properties,
+                    different_pairs: swrl_state.different_pairs,
+                    firings,
+                };
+                apply_swrl_equality_rules(schema, &swrl_ctx, &mut sink)?;
             }
         }
     }

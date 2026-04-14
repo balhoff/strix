@@ -188,6 +188,8 @@ fn run_reason(verbose: u8, quiet: bool, args: ReasonArgs) -> Result<()> {
 
     let mut all_different_pairs = compiled_schema.different_individual_pairs.clone();
     all_different_pairs.extend_from_slice(&swrl_different_pairs);
+    all_different_pairs.sort_unstable();
+    all_different_pairs.dedup();
 
     // Build disjoint-property assertions index once, shared by both
     // DifferentIndividuals inference and DisjointProperties inconsistency check.
