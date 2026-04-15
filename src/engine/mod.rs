@@ -1518,10 +1518,9 @@ pub fn materialize(
     let relation_budget = engine_budget / 4;
     let work_dir = store.work_dir().to_path_buf();
 
-    let mut candidate_types =
-        BinaryRelation::with_compression(&work_dir, "engine-cand-types", relation_budget, false);
+    let mut candidate_types = BinaryRelation::new(&work_dir, "engine-cand-types", relation_budget);
     let mut candidate_properties =
-        TernaryRelation::with_compression(&work_dir, "engine-cand-props", relation_budget, false);
+        TernaryRelation::new(&work_dir, "engine-cand-props", relation_budget);
     let mut union_find = UnionFind::new();
 
     // Seed from SameIndividual axioms (once, before the fixpoint loop).
@@ -1627,10 +1626,9 @@ fn inner_fixpoint(
     swrl_state: &mut SwrlState<'_>,
 ) -> Result<()> {
     let work_dir = store.work_dir().to_path_buf();
-    let mut delta_types =
-        BinaryRelation::with_compression(&work_dir, "engine-delta-types", relation_budget, false);
+    let mut delta_types = BinaryRelation::new(&work_dir, "engine-delta-types", relation_budget);
     let mut delta_properties =
-        TernaryRelation::with_compression(&work_dir, "engine-delta-props", relation_budget, false);
+        TernaryRelation::new(&work_dir, "engine-delta-props", relation_budget);
 
     let mut chain_bufs = ChainBuffers::new();
 

@@ -20,20 +20,10 @@ pub struct BinaryRelation {
     segment_counter: usize,
     label: &'static str,
     budget_bytes: usize,
-    compress: bool,
 }
 
 impl BinaryRelation {
     pub fn new(work_dir: &Path, label: &'static str, budget_bytes: usize) -> Self {
-        Self::with_compression(work_dir, label, budget_bytes, true)
-    }
-
-    pub fn with_compression(
-        work_dir: &Path,
-        label: &'static str,
-        budget_bytes: usize,
-        compress: bool,
-    ) -> Self {
         Self {
             segments: Vec::new(),
             buffer: Vec::new(),
@@ -41,7 +31,6 @@ impl BinaryRelation {
             segment_counter: 0,
             label,
             budget_bytes,
-            compress,
         }
     }
 
@@ -60,7 +49,7 @@ impl BinaryRelation {
         self.buffer.par_sort_unstable();
         self.buffer.dedup();
         let path = self.next_segment_path();
-        let segment = write_binary_segment(&path, &self.buffer, self.compress)?;
+        let segment = write_binary_segment(&path, &self.buffer)?;
         self.segments.push(segment);
         self.buffer.clear();
         Ok(())
@@ -74,11 +63,11 @@ impl BinaryRelation {
         }
         let mut iters = Vec::with_capacity(self.segments.len());
         for segment in &self.segments {
-            iters.push(BinarySegmentIter::open(&segment.path, segment.compressed)?);
+            iters.push(BinarySegmentIter::open(&segment.path)?);
         }
         let merge = MergeBinaryIter::new(iters)?;
         let path = self.next_segment_path();
-        let new_segment = write_binary_segment_streaming(&path, merge, self.compress)?;
+        let new_segment = write_binary_segment_streaming(&path, merge)?;
         for segment in &self.segments {
             let _ = std::fs::remove_file(&segment.path);
         }
@@ -111,7 +100,7 @@ impl BinaryRelation {
         self.flush()?;
         let mut iters = Vec::with_capacity(self.segments.len());
         for segment in &self.segments {
-            iters.push(BinarySegmentIter::open(&segment.path, segment.compressed)?);
+            iters.push(BinarySegmentIter::open(&segment.path)?);
         }
         Ok(iters)
     }
@@ -137,20 +126,10 @@ pub struct TernaryRelation {
     segment_counter: usize,
     label: &'static str,
     budget_bytes: usize,
-    compress: bool,
 }
 
 impl TernaryRelation {
     pub fn new(work_dir: &Path, label: &'static str, budget_bytes: usize) -> Self {
-        Self::with_compression(work_dir, label, budget_bytes, true)
-    }
-
-    pub fn with_compression(
-        work_dir: &Path,
-        label: &'static str,
-        budget_bytes: usize,
-        compress: bool,
-    ) -> Self {
         Self {
             segments: Vec::new(),
             buffer: Vec::new(),
@@ -158,7 +137,6 @@ impl TernaryRelation {
             segment_counter: 0,
             label,
             budget_bytes,
-            compress,
         }
     }
 
@@ -177,7 +155,7 @@ impl TernaryRelation {
         self.buffer.par_sort_unstable();
         self.buffer.dedup();
         let path = self.next_segment_path();
-        let segment = write_ternary_segment(&path, &self.buffer, self.compress)?;
+        let segment = write_ternary_segment(&path, &self.buffer)?;
         self.segments.push(segment);
         self.buffer.clear();
         Ok(())
@@ -191,11 +169,11 @@ impl TernaryRelation {
         }
         let mut iters = Vec::with_capacity(self.segments.len());
         for segment in &self.segments {
-            iters.push(TernarySegmentIter::open(&segment.path, segment.compressed)?);
+            iters.push(TernarySegmentIter::open(&segment.path)?);
         }
         let merge = MergeTernaryIter::new(iters)?;
         let path = self.next_segment_path();
-        let new_segment = write_ternary_segment_streaming(&path, merge, self.compress)?;
+        let new_segment = write_ternary_segment_streaming(&path, merge)?;
         for segment in &self.segments {
             let _ = std::fs::remove_file(&segment.path);
         }
@@ -228,7 +206,7 @@ impl TernaryRelation {
         self.flush()?;
         let mut iters = Vec::with_capacity(self.segments.len());
         for segment in &self.segments {
-            iters.push(TernarySegmentIter::open(&segment.path, segment.compressed)?);
+            iters.push(TernarySegmentIter::open(&segment.path)?);
         }
         Ok(iters)
     }
