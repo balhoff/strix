@@ -58,6 +58,45 @@ fn sorted_insert(vec: &mut Vec<TermId>, value: TermId) {
     }
 }
 
+/// Merge `new` (sorted, deduplicated) into `existing` (sorted, deduplicated)
+/// in a single O(n+m) pass, avoiding the O(n*m) cost of repeated Vec::insert.
+fn merge_sorted_into(existing: &mut Vec<TermId>, new: &[TermId]) {
+    if new.is_empty() {
+        return;
+    }
+    if existing.is_empty() {
+        existing.extend_from_slice(new);
+        return;
+    }
+    if *existing.last().unwrap() < new[0] {
+        existing.extend_from_slice(new);
+        return;
+    }
+    let mut merged = Vec::with_capacity(existing.len() + new.len());
+    let mut i = 0;
+    let mut j = 0;
+    while i < existing.len() && j < new.len() {
+        match existing[i].cmp(&new[j]) {
+            std::cmp::Ordering::Less => {
+                merged.push(existing[i]);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                merged.push(new[j]);
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                merged.push(existing[i]);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    merged.extend_from_slice(&existing[i..]);
+    merged.extend_from_slice(&new[j..]);
+    *existing = merged;
+}
+
 struct PropertyIndex {
     /// (predicate, subject) → sorted vec of objects
     by_pred_subj: BTreeMap<(TermId, TermId), Vec<TermId>>,
@@ -140,9 +179,50 @@ impl TypeIndex {
         }
     }
 
-    fn insert_sorted(&mut self, instance: TermId, class: TermId) {
-        sorted_insert(self.by_instance.entry(instance).or_default(), class);
-        sorted_insert(self.by_class.entry(class).or_default(), instance);
+    /// Batch-merge sorted (instance, class) deltas into both maps.
+    /// Deltas must arrive sorted by (instance, class).
+    fn merge_type_deltas(
+        &mut self,
+        deltas: impl Iterator<Item = std::io::Result<(TermId, TermId)>>,
+        filter: &std::collections::BTreeSet<TermId>,
+    ) -> Result<()> {
+        let mut by_class_pairs: Vec<(TermId, TermId)> = Vec::new();
+
+        let mut current_instance: Option<TermId> = None;
+        let mut batch: Vec<TermId> = Vec::new();
+
+        for result in deltas {
+            let (instance, class) = result?;
+            if !filter.contains(&class) {
+                continue;
+            }
+            if current_instance != Some(instance) {
+                if let Some(inst) = current_instance {
+                    merge_sorted_into(self.by_instance.entry(inst).or_default(), &batch);
+                    batch.clear();
+                }
+                current_instance = Some(instance);
+            }
+            batch.push(class);
+            by_class_pairs.push((class, instance));
+        }
+        if let Some(inst) = current_instance {
+            merge_sorted_into(self.by_instance.entry(inst).or_default(), &batch);
+        }
+
+        by_class_pairs.sort_unstable();
+        let mut i = 0;
+        while i < by_class_pairs.len() {
+            let class = by_class_pairs[i].0;
+            let start = i;
+            while i < by_class_pairs.len() && by_class_pairs[i].0 == class {
+                i += 1;
+            }
+            batch.clear();
+            batch.extend(by_class_pairs[start..i].iter().map(|&(_, inst)| inst));
+            merge_sorted_into(self.by_class.entry(class).or_default(), &batch);
+        }
+        Ok(())
     }
 
     /// Classes that instance belongs to (filtered to indexed classes).
@@ -170,12 +250,7 @@ fn build_type_index(store: &mut FactStore, schema: &CompiledSchema) -> Result<Ty
     }
 
     let mut index = TypeIndex::new();
-    for result in store.known_types_iter()? {
-        let (instance, class) = result?;
-        if schema.indexed_classes.contains(&class) {
-            index.insert_sorted(instance, class);
-        }
-    }
+    index.merge_type_deltas(store.known_types_iter()?, &schema.indexed_classes)?;
     Ok(index)
 }
 
@@ -1735,12 +1810,10 @@ fn inner_fixpoint(
         // (intersection conjuncts, property chain walks, SWRL body atoms)
         // can find facts from both known and delta in a single pass.
         if needs_type_index {
-            for result in MergeBinaryIter::new(delta_types.segment_iters()?)? {
-                let (instance, class) = result?;
-                if schema.indexed_classes.contains(&class) {
-                    type_index.insert_sorted(instance, class);
-                }
-            }
+            type_index.merge_type_deltas(
+                MergeBinaryIter::new(delta_types.segment_iters()?)?,
+                &schema.indexed_classes,
+            )?;
         }
         if needs_property_index {
             for result in MergeTernaryIter::new(delta_properties.segment_iters()?)? {
