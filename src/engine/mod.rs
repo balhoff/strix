@@ -52,12 +52,6 @@ pub struct MaterializeResult {
 ///
 /// Only indexes predicates listed in `CompiledSchema::indexed_predicates`
 /// (transitive, someValuesFrom, allValuesFrom properties).
-fn sorted_insert(vec: &mut Vec<TermId>, value: TermId) {
-    if let Err(pos) = vec.binary_search(&value) {
-        vec.insert(pos, value);
-    }
-}
-
 /// Merge `new` (sorted, deduplicated) into `existing` (sorted, deduplicated)
 /// in a single O(n+m) pass, avoiding the O(n*m) cost of repeated Vec::insert.
 fn merge_sorted_into(existing: &mut Vec<TermId>, new: &[TermId]) {
@@ -112,9 +106,52 @@ impl PropertyIndex {
         }
     }
 
-    fn insert_sorted(&mut self, subject: TermId, predicate: TermId, object: TermId) {
-        sorted_insert(self.by_pred_subj.entry((predicate, subject)).or_default(), object);
-        sorted_insert(self.by_pred_obj.entry((predicate, object)).or_default(), subject);
+    /// Batch-merge sorted (subject, predicate, object) deltas into both maps.
+    fn merge_property_deltas(
+        &mut self,
+        deltas: impl Iterator<Item = std::io::Result<(TermId, TermId, TermId)>>,
+        filter: &std::collections::BTreeSet<TermId>,
+    ) -> Result<()> {
+        let mut pred_subj: Vec<(TermId, TermId, TermId)> = Vec::new();
+        let mut pred_obj: Vec<(TermId, TermId, TermId)> = Vec::new();
+
+        for result in deltas {
+            let (s, p, o) = result?;
+            if !filter.contains(&p) {
+                continue;
+            }
+            pred_subj.push((p, s, o));
+            pred_obj.push((p, o, s));
+        }
+
+        pred_subj.sort_unstable();
+        let mut batch: Vec<TermId> = Vec::new();
+        let mut i = 0;
+        while i < pred_subj.len() {
+            let key = (pred_subj[i].0, pred_subj[i].1);
+            let start = i;
+            while i < pred_subj.len() && (pred_subj[i].0, pred_subj[i].1) == key {
+                i += 1;
+            }
+            batch.clear();
+            batch.extend(pred_subj[start..i].iter().map(|&(_, _, o)| o));
+            merge_sorted_into(self.by_pred_subj.entry(key).or_default(), &batch);
+        }
+
+        pred_obj.sort_unstable();
+        i = 0;
+        while i < pred_obj.len() {
+            let key = (pred_obj[i].0, pred_obj[i].1);
+            let start = i;
+            while i < pred_obj.len() && (pred_obj[i].0, pred_obj[i].1) == key {
+                i += 1;
+            }
+            batch.clear();
+            batch.extend(pred_obj[start..i].iter().map(|&(_, _, s)| s));
+            merge_sorted_into(self.by_pred_obj.entry(key).or_default(), &batch);
+        }
+
+        Ok(())
     }
 
     /// Objects z such that property(subject, predicate, z) is known.
@@ -149,12 +186,7 @@ fn build_property_index(store: &mut FactStore, schema: &CompiledSchema) -> Resul
     }
 
     let mut index = PropertyIndex::new();
-    for result in store.known_properties_iter()? {
-        let (subject, predicate, object) = result?;
-        if schema.indexed_predicates.contains(&predicate) {
-            index.insert_sorted(subject, predicate, object);
-        }
-    }
+    index.merge_property_deltas(store.known_properties_iter()?, &schema.indexed_predicates)?;
     Ok(index)
 }
 
@@ -1814,12 +1846,10 @@ fn inner_fixpoint(
             )?;
         }
         if needs_property_index {
-            for result in MergeTernaryIter::new(delta_properties.segment_iters()?)? {
-                let (s, p, o) = result?;
-                if schema.indexed_predicates.contains(&p) {
-                    known_prop_index.insert_sorted(s, p, o);
-                }
-            }
+            known_prop_index.merge_property_deltas(
+                MergeTernaryIter::new(delta_properties.segment_iters()?)?,
+                &schema.indexed_predicates,
+            )?;
         }
 
         {
