@@ -1,5 +1,8 @@
 # Strix
 
+> [!WARNING]
+> Strix is under active development and inferences are still being validated.
+
 Forward-chaining OWL 2 RL reasoner for RDF datasets.
 
 Strix reads RDF data and an OWL ontology, materializes all entailed triples
