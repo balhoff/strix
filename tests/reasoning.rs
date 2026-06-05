@@ -484,6 +484,335 @@ _:b0 <http://example.com/p> <http://example.com/o2> .
 }
 
 #[test]
+fn per_file_input_mode_does_not_cross_infer_between_files() {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data_dir = temp_dir.path().join("data");
+    let ontology = temp_dir.path().join("ontology.ofn");
+    let merged_output = temp_dir.path().join("merged.nt");
+    let output_dir = temp_dir.path().join("per-file");
+    let report_path = temp_dir.path().join("batch-report.json");
+
+    fs::create_dir_all(&data_dir).expect("data dir should be created");
+    // a.nt alone infers `x a Super` (via Sub ⊑ Super); b.nt alone infers
+    // `y a Thing` (via Filler ⊑ Thing). Only the *merge* of the two (x p y AND
+    // y a Filler) triggers the someValuesFrom rule that yields `x a HasFiller`.
+    write(
+        &data_dir.join("a.nt"),
+        "\
+<http://example.com/x> <http://example.com/p> <http://example.com/y> .
+<http://example.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Sub> .
+",
+    );
+    write(
+        &data_dir.join("b.nt"),
+        "\
+<http://example.com/y> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Filler> .
+",
+    );
+    write(
+        &ontology,
+        "\
+Prefix(:=<http://example.com/>)
+Ontology(<http://example.com/ontology>
+Declaration(Class(:Filler))
+Declaration(Class(:HasFiller))
+Declaration(Class(:Sub))
+Declaration(Class(:Super))
+Declaration(Class(:Thing))
+Declaration(ObjectProperty(:p))
+SubClassOf(:Sub :Super)
+SubClassOf(:Filler :Thing)
+SubClassOf(ObjectSomeValuesFrom(:p :Filler) :HasFiller)
+)
+",
+    );
+
+    strix::run([
+        "strix",
+        "reason",
+        data_dir.to_str().expect("data path should be UTF-8"),
+        "--ontology",
+        ontology.to_str().expect("ontology path should be UTF-8"),
+        "--output",
+        merged_output.to_str().expect("output path should be UTF-8"),
+    ])
+    .expect("merged reasoning run should succeed");
+
+    let merged = fs::read_to_string(&merged_output).expect("merged output should exist");
+    assert!(merged.contains("<http://example.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/HasFiller> ."));
+
+    strix::run([
+        "strix",
+        "reason",
+        data_dir.to_str().expect("data path should be UTF-8"),
+        "--ontology",
+        ontology.to_str().expect("ontology path should be UTF-8"),
+        "--output",
+        output_dir.to_str().expect("output path should be UTF-8"),
+        "--input-merge",
+        "false",
+        "--report",
+        report_path.to_str().expect("report path should be UTF-8"),
+    ])
+    .expect("per-file reasoning run should succeed");
+
+    let first_output =
+        fs::read_to_string(output_dir.join("000001-a.nt.inferred.nt")).expect("a output exists");
+    let second_output =
+        fs::read_to_string(output_dir.join("000002-b.nt.inferred.nt")).expect("b output exists");
+    // Each file independently produced its own inference (proves per-file
+    // reasoning actually ran and wrote output — not merely an empty file).
+    assert!(first_output.contains("<http://example.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Super> ."));
+    assert!(second_output.contains("<http://example.com/y> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Thing> ."));
+    // But the cross-file inference never appears in either per-file output.
+    assert!(!first_output.contains("<http://example.com/HasFiller>"));
+    assert!(!second_output.contains("<http://example.com/HasFiller>"));
+
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+    assert_eq!(report["input_merge"], serde_json::json!(false));
+    assert_eq!(report["input"]["files"], serde_json::json!(2));
+    assert_eq!(report["datasets"].as_array().unwrap().len(), 2);
+    assert!(
+        report["datasets"][0]["output_path"]
+            .as_str()
+            .unwrap()
+            .contains("000001-a.nt.inferred.nt")
+    );
+}
+
+#[test]
+fn per_file_input_mode_requires_ontology() {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data = temp_dir.path().join("data.nt");
+    let output = temp_dir.path().join("out.nt");
+    write(&data, "");
+
+    let error = strix::run([
+        "strix",
+        "reason",
+        data.to_str().expect("data path should be UTF-8"),
+        "--output",
+        output.to_str().expect("output path should be UTF-8"),
+        "--input-merge",
+        "false",
+    ])
+    .expect_err("per-file mode without ontology should fail");
+
+    // clap enforces this via required_if_eq, so the message is clap's standard
+    // "required arguments were not provided" naming the missing --ontology flag.
+    let message = error.to_string();
+    assert!(message.contains("--ontology"), "message: {message}");
+    assert!(message.contains("required"), "message: {message}");
+}
+
+#[test]
+fn per_file_input_mode_conflicts_with_extract_ontology() {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data = temp_dir.path().join("data.nt");
+    let ontology = temp_dir.path().join("ontology.ofn");
+    let output = temp_dir.path().join("out.nt");
+    write(&data, "");
+    write(
+        &ontology,
+        "\
+Prefix(:=<http://example.com/>)
+Ontology(<http://example.com/ontology>)
+",
+    );
+
+    let error = strix::run([
+        "strix",
+        "reason",
+        data.to_str().expect("data path should be UTF-8"),
+        "--ontology",
+        ontology.to_str().expect("ontology path should be UTF-8"),
+        "--output",
+        output.to_str().expect("output path should be UTF-8"),
+        "--input-merge",
+        "false",
+        "--extract-ontology",
+    ])
+    .expect_err("per-file mode with --extract-ontology should fail");
+
+    assert!(
+        error.to_string().contains("extract-ontology"),
+        "message: {error}"
+    );
+}
+
+#[test]
+fn per_file_input_mode_requires_output_directory_for_multiple_inputs() {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data_dir = temp_dir.path().join("data");
+    let ontology = temp_dir.path().join("ontology.ofn");
+    let output_file = temp_dir.path().join("out.nt");
+
+    fs::create_dir_all(&data_dir).expect("data dir should be created");
+    write(&data_dir.join("a.nt"), "");
+    write(&data_dir.join("b.nt"), "");
+    write(
+        &ontology,
+        "\
+Prefix(:=<http://example.com/>)
+Ontology(<http://example.com/ontology>)
+",
+    );
+    write(&output_file, "already a file");
+
+    let error = strix::run([
+        "strix",
+        "reason",
+        data_dir.to_str().expect("data path should be UTF-8"),
+        "--ontology",
+        ontology.to_str().expect("ontology path should be UTF-8"),
+        "--output",
+        output_file.to_str().expect("output path should be UTF-8"),
+        "--input-merge",
+        "false",
+    ])
+    .expect_err("multiple per-file inputs should require output directory");
+
+    assert!(error.to_string().contains("--output to be a directory"));
+}
+
+#[test]
+fn per_file_input_mode_isolates_per_file_failures() {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data_dir = temp_dir.path().join("data");
+    let ontology = temp_dir.path().join("ontology.ofn");
+    let output_dir = temp_dir.path().join("per-file");
+    let report_path = temp_dir.path().join("batch-report.json");
+
+    fs::create_dir_all(&data_dir).expect("data dir should be created");
+    // a.nt is valid and infers a superclass; b.nt is malformed and must fail.
+    write(
+        &data_dir.join("a.nt"),
+        "<http://example.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Sub> .\n",
+    );
+    write(&data_dir.join("b.nt"), "this is not valid n-triples @@@\n");
+    write(
+        &ontology,
+        "\
+Prefix(:=<http://example.com/>)
+Ontology(<http://example.com/ontology>
+Declaration(Class(:Sub))
+Declaration(Class(:Super))
+SubClassOf(:Sub :Super)
+)
+",
+    );
+
+    // Pre-seed a stale output file at b's expected path, as if left by an earlier
+    // run. The failed input must not leave it behind, so the filesystem matches
+    // the report's `error` status.
+    fs::create_dir_all(&output_dir).expect("output dir should be created");
+    let stale_output = output_dir.join("000002-b.nt.inferred.nt");
+    write(
+        &stale_output,
+        "<http://example.com/stale> <http://example.com/stale> <http://example.com/stale> .\n",
+    );
+
+    let error = strix::run([
+        "strix",
+        "reason",
+        data_dir.to_str().expect("data path should be UTF-8"),
+        "--ontology",
+        ontology.to_str().expect("ontology path should be UTF-8"),
+        "--output",
+        output_dir.to_str().expect("output path should be UTF-8"),
+        "--input-merge",
+        "false",
+        "--report",
+        report_path.to_str().expect("report path should be UTF-8"),
+    ])
+    .expect_err("a malformed input should make the overall run fail");
+    assert!(error.to_string().contains("failed to process"), "{error}");
+
+    // The valid input was still processed and its inference written.
+    let good_output = fs::read_to_string(output_dir.join("000001-a.nt.inferred.nt"))
+        .expect("valid input output should exist");
+    assert!(good_output.contains("<http://example.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Super> ."));
+    // The malformed input produced no output, and the pre-seeded stale file at its
+    // path was removed.
+    assert!(!stale_output.exists());
+
+    // The report is written despite the failure and records both outcomes.
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+    assert_eq!(report["datasets"][0]["status"], serde_json::json!("ok"));
+    assert_eq!(report["datasets"][1]["status"], serde_json::json!("error"));
+    assert!(
+        report["datasets"][1]["error"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty())
+    );
+}
+
+#[test]
+fn per_file_input_mode_halt_records_all_inconsistencies_without_aborting() {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data_dir = temp_dir.path().join("data");
+    let ontology = temp_dir.path().join("ontology.ofn");
+    let output_dir = temp_dir.path().join("per-file");
+    let report_path = temp_dir.path().join("batch-report.json");
+
+    fs::create_dir_all(&data_dir).expect("data dir should be created");
+    // Each file is independently inconsistent (an individual typed as two
+    // disjoint classes).
+    let inconsistent = "\
+<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Cat> .
+<http://x.com/fido> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://x.com/Dog> .
+";
+    write(&data_dir.join("a.nt"), inconsistent);
+    write(&data_dir.join("b.nt"), inconsistent);
+    write(
+        &ontology,
+        "\
+Prefix(:=<http://x.com/>)
+Ontology(<http://x.com/o>
+Declaration(Class(:Cat))
+Declaration(Class(:Dog))
+DisjointClasses(:Cat :Dog)
+)
+",
+    );
+
+    let error = strix::run([
+        "strix",
+        "reason",
+        data_dir.to_str().expect("data path should be UTF-8"),
+        "--ontology",
+        ontology.to_str().expect("ontology path should be UTF-8"),
+        "--output",
+        output_dir.to_str().expect("output path should be UTF-8"),
+        "--input-merge",
+        "false",
+        "--inconsistency-mode",
+        "halt",
+        "--report",
+        report_path.to_str().expect("report path should be UTF-8"),
+    ])
+    .expect_err("halt mode should make the overall run fail when inputs are inconsistent");
+    assert!(error.to_string().contains("inconsisten"), "{error}");
+
+    // Both files were processed before the run signalled failure (no early abort),
+    // and the report records both as inconsistent.
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+    assert_eq!(report["inconsistency_mode"], serde_json::json!("halt"));
+    assert_eq!(report["datasets"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        report["datasets"][0]["status"],
+        serde_json::json!("inconsistent")
+    );
+    assert_eq!(
+        report["datasets"][1]["status"],
+        serde_json::json!("inconsistent")
+    );
+}
+
+#[test]
 fn loads_all_supported_rdf_formats_and_compressions_from_nested_directories() {
     let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
     let data_dir = temp_dir.path().join("data");

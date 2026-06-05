@@ -1,7 +1,8 @@
 mod input;
 mod parser;
 
-pub use parser::visit_path;
+pub use input::{RdfInput, discover_inputs};
+pub use parser::{visit_input, visit_path};
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Term {

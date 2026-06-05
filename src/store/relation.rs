@@ -117,6 +117,15 @@ impl BinaryRelation {
     }
 }
 
+impl Drop for BinaryRelation {
+    /// Delete any spilled segment files so they do not outlive the relation.
+    /// Segment iterators hold their own file handles, so on-disk removal here is
+    /// safe even while a derived iterator is still being read.
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
 /// A disk-backed relation of `(TermId, TermId, TermId)` triples with in-memory buffer.
 #[derive(Debug)]
 pub struct TernaryRelation {
@@ -220,5 +229,12 @@ impl TernaryRelation {
         self.segment_counter += 1;
         self.work_dir
             .join(format!("{}-{:06}.seg", self.label, index))
+    }
+}
+
+impl Drop for TernaryRelation {
+    /// See [`BinaryRelation`]'s `Drop`: removes spilled segment files on drop.
+    fn drop(&mut self) {
+        self.clear();
     }
 }
