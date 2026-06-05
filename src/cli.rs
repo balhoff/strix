@@ -50,12 +50,22 @@ pub struct ReasonArgs {
     pub output: PathBuf,
 
     /// Separate ontology input (.owx, .ofn, .owl, .rdf, .ttl, .nt file or directory)
-    #[arg(short = 'O', long, value_name = "PATH", allow_hyphen_values = true)]
+    #[arg(
+        short = 'O',
+        long,
+        value_name = "PATH",
+        allow_hyphen_values = true,
+        required_if_eq("input_merge", "false")
+    )]
     pub ontology: Option<PathBuf>,
 
     /// Merge schema extracted from data
     #[arg(long)]
     pub extract_ontology: bool,
+
+    /// Merge all input files into a single graph before reasoning
+    #[arg(long, value_name = "BOOL", default_value_t = true, action = ArgAction::Set)]
+    pub input_merge: bool,
 
     /// Ignore annotation-property schema axioms during ontology lowering
     #[arg(long)]
@@ -69,7 +79,7 @@ pub struct ReasonArgs {
     #[arg(long, value_enum, default_value_t = OutputFormat::NTriples)]
     pub output_format: OutputFormat,
 
-    /// Working directory
+    /// Empty working directory for disk-backed intermediate data
     #[arg(short, long, value_name = "PATH", allow_hyphen_values = true)]
     pub work_dir: Option<PathBuf>,
 
@@ -206,6 +216,7 @@ mod tests {
                 assert_eq!(args.output, PathBuf::from("out.nt"));
                 assert_eq!(args.ontology, None);
                 assert!(!args.extract_ontology);
+                assert!(args.input_merge);
                 assert!(!args.ignore_annotation_axioms);
                 assert_eq!(args.emit, EmitMode::Inferred);
                 assert_eq!(args.output_format, OutputFormat::NTriples);
@@ -266,6 +277,45 @@ mod tests {
                 assert_eq!(args.report, Some(PathBuf::from("-report.json")));
             }
         }
+    }
+
+    #[test]
+    fn parses_per_file_input_merge_mode() {
+        // `--input-merge false` requires `--ontology` (enforced by clap).
+        let cli = Cli::try_parse_from([
+            "strix",
+            "reason",
+            "data.nt",
+            "--output",
+            "out",
+            "--input-merge",
+            "false",
+            "--ontology",
+            "schema.ofn",
+        ])
+        .expect("CLI should parse input merge mode");
+
+        match cli.command {
+            Commands::Reason(args) => {
+                assert!(!args.input_merge);
+            }
+        }
+    }
+
+    #[test]
+    fn input_merge_false_requires_ontology() {
+        let error = Cli::try_parse_from([
+            "strix",
+            "reason",
+            "data.nt",
+            "--output",
+            "out",
+            "--input-merge",
+            "false",
+        ])
+        .expect_err("--input-merge false without --ontology should be rejected");
+
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]

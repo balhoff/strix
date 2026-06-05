@@ -29,10 +29,11 @@ strix reason <DATA>... --output <PATH> [OPTIONS]
 |---|---|---|
 | `--ontology`, `-O` | none | Separate ontology file or directory (`.ofn`, `.owx`, `.owl`, `.rdf`, `.ttl`, `.nt`) |
 | `--extract-ontology` | off | Also extract schema axioms from the data files |
+| `--input-merge` | `true` | `true` merges all input files into one graph; `false` reasons over each discovered input file independently and requires `--ontology` |
 | `--emit` | `inferred` | `inferred` (new triples only) or `closure` (all triples) |
 | `--output-format` | `ntriples` | Output serialization format |
 | `--memory-budget`, `-m` | `4G` | Memory budget (e.g. `4G`, `512M`, `2048K`) |
-| `--work-dir`, `-w` | system temp | Directory for intermediate disk-backed relations |
+| `--work-dir`, `-w` | system temp | Empty directory for intermediate disk-backed relations; created if missing |
 | `--report` | none | Write a JSON run report to this path |
 | `--max-iterations` | none | Safety cap on fixpoint iterations |
 | `--inconsistency-mode` | `report` | `report` (log warnings) or `halt` (return error) |
@@ -62,6 +63,13 @@ strix reason data.nt.gz --ontology schema.owl --emit closure -m 8G -o full.nt
 
 # Extract schema from data (no separate ontology file)
 strix reason data.ttl --extract-ontology --output inferred.nt
+
+# Apply one ontology independently to each file under a directory.
+# --output is treated as a directory and one file is written per input. Each input
+# is reasoned over in isolation: a parse/IO/reasoning failure (or, under
+# --inconsistency-mode halt, an inconsistency) is recorded against that input in the
+# run report and the batch continues; the run still exits non-zero if any input failed.
+strix reason data/ -O ontology.ofn --input-merge false --output inferred-by-file/ --report report.json
 
 # Write a JSON run report
 strix reason data.nt -O ontology.ofn -o inferred.nt --report report.json

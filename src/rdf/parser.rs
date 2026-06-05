@@ -31,11 +31,18 @@ where
     Ok(())
 }
 
+pub fn visit_input<F>(input: &RdfInput, visitor: F) -> Result<()>
+where
+    F: FnMut(Triple) -> Result<()>,
+{
+    visit_file(input, 0, false, visitor)
+}
+
 fn visit_file<F>(
     input: &RdfInput,
     file_index: usize,
     namespace_blank_nodes: bool,
-    visitor: &mut F,
+    mut visitor: F,
 ) -> Result<()>
 where
     F: FnMut(Triple) -> Result<()>,

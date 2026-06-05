@@ -15,6 +15,59 @@ pub struct RunReport {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct BatchRunReport {
+    pub version: u32,
+    pub input_merge: bool,
+    pub inconsistency_mode: String,
+    pub input: BatchInputReport,
+    pub ontology: OntologyReport,
+    pub compiled: CompiledSchemaReport,
+    pub rules: RulesReport,
+    pub datasets: Vec<DatasetRunReport>,
+    pub peak_rss_bytes: Option<u64>,
+    pub wall_time_ms: u128,
+    pub schema_compile_time_ms: u128,
+    pub ingest_time_ms: u128,
+    pub export_time_ms: u128,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BatchInputReport {
+    pub files: usize,
+    pub triples: usize,
+    pub dictionary_terms: usize,
+    pub output_triples: usize,
+    pub memory_budget_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatasetStatus {
+    /// Reasoning completed and output was written with no inconsistencies.
+    Ok,
+    /// Reasoning completed and output was written, but inconsistencies were found.
+    Inconsistent,
+    /// The input could not be processed (parse/IO/reasoning error); no output written.
+    Error,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DatasetRunReport {
+    pub input_path: String,
+    pub output_path: String,
+    pub status: DatasetStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub input_triples: usize,
+    pub output_triples: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningReport>,
+    pub ingest_time_ms: u128,
+    pub reasoning_time_ms: u128,
+    pub export_time_ms: u128,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct InputReport {
     pub triples: usize,
     pub dictionary_terms: usize,

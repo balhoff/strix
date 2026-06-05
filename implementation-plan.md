@@ -363,9 +363,10 @@ The CLI below is the long-term target surface. For implementation, freeze a smal
 **Available in Phase 1:**
 - `--ontology <path>` / `-O`: Separate ontology file. If omitted, extract the Phase 1 schema subset from data.
 - `--extract-ontology`: Merge extracted schema triples from data even when `--ontology` is provided.
+- `--input-merge true|false`: Merge discovered data files into one ABox graph by default. With `false`, require `--ontology`, compile it once, and run inference independently for each discovered data file.
 - `--emit inferred|closure`: Output inferred-only (default) or full closure. Implemented via asserted/derived segment separation.
 - `--output-format ntriples`: Output format (Phase 1 only)
-- `--work-dir <path>` / `-w`: Directory for working files (default: temp)
+- `--work-dir <path>` / `-w`: Empty directory for working files, created if missing (default: temp)
 - `--memory-budget <size>` / `-m`: Memory budget (default: 4G)
 - `--report <path>`: Write run-report.json to this path
 - `--max-iterations <n>`: Safety limit on fixpoint iterations
@@ -477,6 +478,7 @@ Not using a general-purpose embedded database for ABox storage. The sorted-run s
    - Decode IDs -> RDF terms
    - Write N-Triples output
    - Emit inferred-only from derived segments or full closure from the known view
+   - In per-file input mode, treat `--output` as a directory for multiple discovered inputs and write one deterministic output file per input.
    - Basic run-report.json
 
 **Non-goals for Phase 1**: `owl:sameAs`, SWRL, checkpoint/resume, parallel rule evaluation, Turtle output, and full RDF-based OWL extraction via blank-node/list closure.
