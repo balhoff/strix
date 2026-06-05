@@ -12,9 +12,11 @@ pub mod store;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
+use std::io::ErrorKind as IoErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use anyhow::Context;
 use clap::{Parser, ValueEnum, error::ErrorKind};
 use tracing_subscriber::EnvFilter;
 
@@ -90,18 +92,7 @@ fn run_reason(verbose: u8, quiet: bool, args: ReasonArgs) -> Result<()> {
         return run_reason_per_file(args, wall_clock);
     }
 
-    let temp_dir = if args.work_dir.is_none() {
-        Some(tempfile::TempDir::new()?)
-    } else {
-        None
-    };
-    let work_dir = match &args.work_dir {
-        Some(dir) => {
-            fs::create_dir_all(dir)?;
-            dir.clone()
-        }
-        None => temp_dir.as_ref().unwrap().path().to_path_buf(),
-    };
+    let (_temp_dir, work_dir) = prepare_work_dir(args.work_dir.as_deref())?;
 
     let mut dictionary = Dictionary::new();
     let well_known = WellKnown::register(&mut dictionary);
@@ -240,18 +231,7 @@ fn run_reason_per_file(args: ReasonArgs, wall_clock: Instant) -> Result<()> {
         .as_ref()
         .expect("clap requires --ontology when --input-merge false");
 
-    let temp_dir = if args.work_dir.is_none() {
-        Some(tempfile::TempDir::new()?)
-    } else {
-        None
-    };
-    let work_dir = match &args.work_dir {
-        Some(dir) => {
-            fs::create_dir_all(dir)?;
-            dir.clone()
-        }
-        None => temp_dir.as_ref().unwrap().path().to_path_buf(),
-    };
+    let (_temp_dir, work_dir) = prepare_work_dir(args.work_dir.as_deref())?;
 
     // Resolve the input/output layout up front so configuration errors fail fast,
     // before the (potentially expensive) ontology load and schema compile.
@@ -342,8 +322,18 @@ fn run_reason_per_file(args: ReasonArgs, wall_clock: Instant) -> Result<()> {
         };
 
         // The store created inside process_one_input has been dropped (clearing
-        // its segment files); remove the now-empty per-input working directory.
-        let _ = fs::remove_dir_all(&dataset_work_dir);
+        // its segment files); remove only the now-empty per-input working
+        // directory. If anything unexpected remains, leave it in place rather
+        // than recursively deleting files not tracked by the store.
+        if let Err(error) = fs::remove_dir(&dataset_work_dir) {
+            if error.kind() != IoErrorKind::NotFound {
+                tracing::warn!(
+                    work_dir = %dataset_work_dir.display(),
+                    error = %error,
+                    "Failed to remove empty per-input work directory"
+                );
+            }
+        }
 
         total_input_triples += dataset.input_triples;
         total_output_triples += dataset.output_triples;
@@ -410,6 +400,37 @@ fn run_reason_per_file(args: ReasonArgs, wall_clock: Instant) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+fn prepare_work_dir(work_dir: Option<&Path>) -> Result<(Option<tempfile::TempDir>, PathBuf)> {
+    match work_dir {
+        Some(dir) => {
+            fs::create_dir_all(dir)
+                .with_context(|| format!("failed to create --work-dir {}", dir.display()))?;
+            ensure_work_dir_empty(dir)?;
+            Ok((None, dir.to_path_buf()))
+        }
+        None => {
+            let temp_dir = tempfile::TempDir::new()?;
+            let path = temp_dir.path().to_path_buf();
+            Ok((Some(temp_dir), path))
+        }
+    }
+}
+
+fn ensure_work_dir_empty(dir: &Path) -> Result<()> {
+    let mut entries = fs::read_dir(dir)
+        .with_context(|| format!("failed to read --work-dir {}", dir.display()))?;
+    if let Some(entry) = entries.next() {
+        let entry =
+            entry.with_context(|| format!("failed to inspect --work-dir {}", dir.display()))?;
+        anyhow::bail!(
+            "--work-dir {} must be empty before running; found {}",
+            dir.display(),
+            entry.path().display()
+        );
+    }
     Ok(())
 }
 

@@ -366,7 +366,7 @@ The CLI below is the long-term target surface. For implementation, freeze a smal
 - `--input-merge true|false`: Merge discovered data files into one ABox graph by default. With `false`, require `--ontology`, compile it once, and run inference independently for each discovered data file.
 - `--emit inferred|closure`: Output inferred-only (default) or full closure. Implemented via asserted/derived segment separation.
 - `--output-format ntriples`: Output format (Phase 1 only)
-- `--work-dir <path>` / `-w`: Directory for working files (default: temp)
+- `--work-dir <path>` / `-w`: Empty directory for working files, created if missing (default: temp)
 - `--memory-budget <size>` / `-m`: Memory budget (default: 4G)
 - `--report <path>`: Write run-report.json to this path
 - `--max-iterations <n>`: Safety limit on fixpoint iterations

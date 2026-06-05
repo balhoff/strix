@@ -55,6 +55,51 @@ fn reasons_with_separate_ontology() {
 }
 
 #[test]
+fn provided_work_dir_must_be_empty() {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data = temp_dir.path().join("data.nt");
+    let ontology = temp_dir.path().join("ontology.ofn");
+    let output = temp_dir.path().join("inferred.nt");
+    let work_dir = temp_dir.path().join("work");
+
+    fs::create_dir_all(&work_dir).expect("work dir should be created");
+    write(&work_dir.join("stale.seg"), "not from this run");
+    write(
+        &data,
+        "<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Sub> .\n",
+    );
+    write(
+        &ontology,
+        "\
+Prefix(:=<http://example.com/>)
+Ontology(<http://example.com/ontology>
+Declaration(Class(:Sub))
+Declaration(Class(:Super))
+SubClassOf(:Sub :Super)
+)
+",
+    );
+
+    let error = strix::run([
+        "strix",
+        "reason",
+        data.to_str().expect("data path should be UTF-8"),
+        "--ontology",
+        ontology.to_str().expect("ontology path should be UTF-8"),
+        "--output",
+        output.to_str().expect("output path should be UTF-8"),
+        "--work-dir",
+        work_dir.to_str().expect("work dir path should be UTF-8"),
+    ])
+    .expect_err("non-empty work dir should fail");
+
+    let message = error.to_string();
+    assert!(message.contains("--work-dir"), "message: {message}");
+    assert!(message.contains("empty"), "message: {message}");
+    assert!(work_dir.join("stale.seg").exists());
+}
+
+#[test]
 fn reasons_with_rdf_xml_ontology() {
     let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
     let data = temp_dir.path().join("data.nt");
@@ -674,6 +719,55 @@ Ontology(<http://example.com/ontology>)
     .expect_err("multiple per-file inputs should require output directory");
 
     assert!(error.to_string().contains("--output to be a directory"));
+}
+
+#[test]
+fn per_file_input_mode_rejects_preexisting_work_dir_child() {
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data = temp_dir.path().join("data.nt");
+    let ontology = temp_dir.path().join("ontology.ofn");
+    let output = temp_dir.path().join("out.nt");
+    let work_dir = temp_dir.path().join("work");
+    let existing_child = work_dir.join("input-000001");
+    let user_file = existing_child.join("keep.txt");
+
+    fs::create_dir_all(&existing_child).expect("existing work child should be created");
+    write(&user_file, "not from this run");
+    write(
+        &data,
+        "<http://example.com/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Sub> .\n",
+    );
+    write(
+        &ontology,
+        "\
+Prefix(:=<http://example.com/>)
+Ontology(<http://example.com/ontology>
+Declaration(Class(:Sub))
+Declaration(Class(:Super))
+SubClassOf(:Sub :Super)
+)
+",
+    );
+
+    let error = strix::run([
+        "strix",
+        "reason",
+        data.to_str().expect("data path should be UTF-8"),
+        "--ontology",
+        ontology.to_str().expect("ontology path should be UTF-8"),
+        "--output",
+        output.to_str().expect("output path should be UTF-8"),
+        "--input-merge",
+        "false",
+        "--work-dir",
+        work_dir.to_str().expect("work dir path should be UTF-8"),
+    ])
+    .expect_err("preexisting per-file work child should fail");
+
+    let message = error.to_string();
+    assert!(message.contains("--work-dir"), "message: {message}");
+    assert!(message.contains("empty"), "message: {message}");
+    assert!(user_file.exists());
 }
 
 #[test]

@@ -79,7 +79,7 @@ pub struct ReasonArgs {
     #[arg(long, value_enum, default_value_t = OutputFormat::NTriples)]
     pub output_format: OutputFormat,
 
-    /// Working directory
+    /// Empty working directory for disk-backed intermediate data
     #[arg(short, long, value_name = "PATH", allow_hyphen_values = true)]
     pub work_dir: Option<PathBuf>,
 

@@ -30,7 +30,7 @@ strix reason <DATA>... --output <PATH> [OPTIONS]
 | `--emit` | `inferred` | `inferred` (new triples only) or `closure` (all triples) |
 | `--output-format` | `ntriples` | Output serialization format |
 | `--memory-budget`, `-m` | `4G` | Memory budget (e.g. `4G`, `512M`, `2048K`) |
-| `--work-dir`, `-w` | system temp | Directory for intermediate disk-backed relations |
+| `--work-dir`, `-w` | system temp | Empty directory for intermediate disk-backed relations; created if missing |
 | `--report` | none | Write a JSON run report to this path |
 | `--max-iterations` | none | Safety cap on fixpoint iterations |
 | `--inconsistency-mode` | `report` | `report` (log warnings) or `halt` (return error) |
