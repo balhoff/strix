@@ -625,7 +625,9 @@ fn apply_swrl_type_rules(
             let mut bindings = vec![None; rule.num_vars as usize];
 
             if let SwrlBodyAtom::ClassAtom { arg, .. } = &rule.body[rule.trigger] {
-                bind_arg(*arg, instance, &mut bindings);
+                if !bind_or_match_arg(*arg, instance, &mut bindings) {
+                    continue;
+                }
             }
 
             resolve_body(
@@ -673,8 +675,11 @@ fn apply_swrl_property_rules(
                 ..
             } = &rule.body[rule.trigger]
             {
-                bind_arg(*s_arg, subject, &mut bindings);
-                bind_arg(*o_arg, object, &mut bindings);
+                if !bind_or_match_arg(*s_arg, subject, &mut bindings)
+                    || !bind_or_match_arg(*o_arg, object, &mut bindings)
+                {
+                    continue;
+                }
             }
 
             resolve_body(
@@ -696,9 +701,16 @@ fn apply_swrl_property_rules(
     Ok(())
 }
 
-fn bind_arg(arg: SwrlArg, value: TermId, bindings: &mut [Option<TermId>]) {
-    if let SwrlArg::Variable(v) = arg {
-        bindings[v as usize] = Some(value);
+fn bind_or_match_arg(arg: SwrlArg, value: TermId, bindings: &mut [Option<TermId>]) -> bool {
+    match arg {
+        SwrlArg::Variable(v) => match bindings[v as usize] {
+            Some(bound) => bound == value,
+            None => {
+                bindings[v as usize] = Some(value);
+                true
+            }
+        },
+        SwrlArg::Constant(c) => c == value,
     }
 }
 
@@ -775,8 +787,7 @@ fn apply_swrl_equality_rules(
                                         ctx,
                                         &mut |bindings| {
                                             sink.firings.swrl += 1;
-                                            let _ =
-                                                emit_head(&rule.head, bindings, ctx, sink);
+                                            let _ = emit_head(&rule.head, bindings, ctx, sink);
                                         },
                                     );
                                 }
@@ -798,9 +809,7 @@ fn apply_swrl_equality_rules(
                                             ctx,
                                             &mut |bindings| {
                                                 sink.firings.swrl += 1;
-                                                let _ = emit_head(
-                                                    &rule.head, bindings, ctx, sink,
-                                                );
+                                                let _ = emit_head(&rule.head, bindings, ctx, sink);
                                             },
                                         );
                                         bindings[lv] = Some(b);
@@ -812,9 +821,7 @@ fn apply_swrl_equality_rules(
                                             ctx,
                                             &mut |bindings| {
                                                 sink.firings.swrl += 1;
-                                                let _ = emit_head(
-                                                    &rule.head, bindings, ctx, sink,
-                                                );
+                                                let _ = emit_head(&rule.head, bindings, ctx, sink);
                                             },
                                         );
                                     }
@@ -1218,8 +1225,14 @@ fn evaluate_equality_rules(
     // FunctionalProperty: union multiple objects for same (pred, subject).
     // Literals cannot be merged — distinct literals are an inconsistency.
     for (&(pred, subj), objects) in &fp_groups {
-        new_equalities +=
-            union_all_checking_literals(subj, pred, objects, union_find, &is_literal, &mut literal_conflicts);
+        new_equalities += union_all_checking_literals(
+            subj,
+            pred,
+            objects,
+            union_find,
+            &is_literal,
+            &mut literal_conflicts,
+        );
     }
 
     // InverseFunctionalProperty: union multiple subjects for same (pred, object).

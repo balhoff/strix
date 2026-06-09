@@ -161,14 +161,26 @@ impl CompiledSchema {
             property_chains: self.property_chains.len(),
             chain_trigger_entries: self.chain_triggers.values().map(|v| v.len()).sum(),
             universal_types: self.universal_types.len(),
-            has_value_rules: self.has_value_by_prop.values().map(|v| v.len()).sum::<usize>()
-                + self.has_value_by_class.values().map(|v| v.len()).sum::<usize>(),
+            has_value_rules: self
+                .has_value_by_prop
+                .values()
+                .map(|v| v.len())
+                .sum::<usize>()
+                + self
+                    .has_value_by_class
+                    .values()
+                    .map(|v| v.len())
+                    .sum::<usize>(),
             some_values_from_rules: self
                 .some_values_from_by_prop
                 .values()
                 .map(|v| v.len())
                 .sum::<usize>()
-                + self.svf_thing_by_prop.values().map(|v| v.len()).sum::<usize>(),
+                + self
+                    .svf_thing_by_prop
+                    .values()
+                    .map(|v| v.len())
+                    .sum::<usize>(),
             all_values_from_rules: self
                 .all_values_from_by_class
                 .values()
@@ -259,7 +271,11 @@ impl CompiledSchema {
 ///
 /// `rdfs_literal` is the TermId for `rdfs:Literal` (the top data range).
 /// It is treated like `owl:Thing` for data property restriction fillers.
-pub fn compile_schema(schema: &RawSchema, owl_thing: TermId, rdfs_literal: TermId) -> CompiledSchema {
+pub fn compile_schema(
+    schema: &RawSchema,
+    owl_thing: TermId,
+    rdfs_literal: TermId,
+) -> CompiledSchema {
     let is_top = |id: TermId| id == owl_thing || id == rdfs_literal;
     let (mut subclass_closure, subclass_iterations, subclass_inferred) =
         transitive_closure(&schema.subclasses);
@@ -334,11 +350,7 @@ pub fn compile_schema(schema: &RawSchema, owl_thing: TermId, rdfs_literal: TermI
     let mut intersection_by_class: BTreeMap<TermId, Vec<usize>> = BTreeMap::new();
     let mut conjunct_of: BTreeMap<TermId, Vec<usize>> = BTreeMap::new();
     for (class, conjuncts) in &schema.intersection_of {
-        let filtered: Vec<TermId> = conjuncts
-            .iter()
-            .copied()
-            .filter(|&c| !is_top(c))
-            .collect();
+        let filtered: Vec<TermId> = conjuncts.iter().copied().filter(|&c| !is_top(c)).collect();
         if filtered.is_empty() {
             continue;
         }
@@ -596,31 +608,34 @@ fn compile_swrl_rules(schema: &RawSchema) -> CompiledSwrlRules {
             .collect();
 
         let num_vars = next_var;
-        let trigger = select_trigger(&body);
-        let remaining: Vec<usize> = (0..body.len()).filter(|&i| i != trigger).collect();
-
-        // Multi-head rules expand into one compiled rule per head atom.
+        // Multi-head rules expand into one compiled rule per head atom, and
+        // each head is indexed by every body atom. A single chosen trigger is
+        // incomplete because body facts can become known in any order across
+        // the fixpoint.
         for head in heads {
-            let idx = rules.len();
-            match &body[trigger] {
-                SwrlBodyAtom::ClassAtom { class, .. } => {
-                    by_type.entry(*class).or_default().push(idx);
+            for trigger in 0..body.len() {
+                let remaining: Vec<usize> = (0..body.len()).filter(|&i| i != trigger).collect();
+                let idx = rules.len();
+                match &body[trigger] {
+                    SwrlBodyAtom::ClassAtom { class, .. } => {
+                        by_type.entry(*class).or_default().push(idx);
+                    }
+                    SwrlBodyAtom::PropertyAtom { property, .. } => {
+                        by_prop.entry(*property).or_default().push(idx);
+                    }
+                    SwrlBodyAtom::SameIndividualAtom { .. }
+                    | SwrlBodyAtom::DifferentIndividualsAtom { .. } => {
+                        equality_triggered.push(idx);
+                    }
                 }
-                SwrlBodyAtom::PropertyAtom { property, .. } => {
-                    by_prop.entry(*property).or_default().push(idx);
-                }
-                SwrlBodyAtom::SameIndividualAtom { .. }
-                | SwrlBodyAtom::DifferentIndividualsAtom { .. } => {
-                    equality_triggered.push(idx);
-                }
+                rules.push(CompiledSwrlRule {
+                    trigger,
+                    remaining,
+                    body: body.clone(),
+                    head: head.clone(),
+                    num_vars,
+                });
             }
-            rules.push(CompiledSwrlRule {
-                trigger,
-                remaining: remaining.clone(),
-                body: body.clone(),
-                head,
-                num_vars,
-            });
         }
     }
 
@@ -629,50 +644,6 @@ fn compile_swrl_rules(schema: &RawSchema) -> CompiledSwrlRules {
         by_type_trigger: by_type,
         by_prop_trigger: by_prop,
         equality_triggered,
-    }
-}
-
-/// Select the best trigger atom for a SWRL rule body.
-///
-/// Heuristic: pick the atom that will be most selective when scanned from
-/// deltas. Property atoms bind 2 variables per match (subject + object)
-/// vs 1 for class atoms, so we prefer them when tied on "new variables bound".
-fn select_trigger(body: &[SwrlBodyAtom]) -> usize {
-    let mut bound: u64 = 0;
-    let mut best = 0;
-    let mut best_score: (bool, usize, bool) = (false, 0, false);
-
-    for (i, atom) in body.iter().enumerate() {
-        let var_mask = atom_var_mask(atom);
-        let new = (var_mask & !bound).count_ones() as usize;
-        let is_prop = matches!(atom, SwrlBodyAtom::PropertyAtom { .. });
-        let is_dispatchable = !matches!(
-            atom,
-            SwrlBodyAtom::SameIndividualAtom { .. } | SwrlBodyAtom::DifferentIndividualsAtom { .. }
-        );
-        let score = (is_dispatchable, new, is_prop);
-        if score > best_score {
-            best_score = score;
-            best = i;
-        }
-        bound |= var_mask;
-    }
-    best
-}
-
-/// Returns a bitmask of variable IDs referenced by the atom.
-fn atom_var_mask(atom: &SwrlBodyAtom) -> u64 {
-    match atom {
-        SwrlBodyAtom::ClassAtom { arg, .. } => arg.as_variable().map_or(0, |v| 1 << v),
-        SwrlBodyAtom::PropertyAtom {
-            subject, object, ..
-        } => {
-            subject.as_variable().map_or(0, |v| 1 << v) | object.as_variable().map_or(0, |v| 1 << v)
-        }
-        SwrlBodyAtom::SameIndividualAtom { left, right }
-        | SwrlBodyAtom::DifferentIndividualsAtom { left, right } => {
-            left.as_variable().map_or(0, |v| 1 << v) | right.as_variable().map_or(0, |v| 1 << v)
-        }
     }
 }
 
