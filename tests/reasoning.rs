@@ -4329,6 +4329,53 @@ fn swrl_multi_atom_join_inference() {
 }
 
 #[test]
+fn swrl_join_sees_asserted_and_inferred_property_body_matches() {
+    // Mirrors the GO-CAM phosphorylation shortcut:
+    // direct_pos_reg(a1,a2) -> direct_reg(a1,a2)
+    // specific_kinase(a1) -> kinase(a1)
+    // direct_reg(a1,a2) & kinase(a1) & enabled_by(a1,g1) & enabled_by(a2,g2)
+    //   -> phosphorylates(g1,g2)
+    let inferred = reason(
+        "<http://example.com/a1> <http://example.com/direct_pos_regulates> <http://example.com/a2> .\n\
+         <http://example.com/a1> <http://example.com/enabled_by> <http://example.com/g1> .\n\
+         <http://example.com/a2> <http://example.com/enabled_by> <http://example.com/g2_asserted> .\n\
+         <http://example.com/a2> <http://example.com/enabled_by_seed> <http://example.com/g2_inferred> .\n\
+         <http://example.com/a1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/specific_kinase> .\n",
+        "Prefix(:=<http://example.com/>)\n\
+         Ontology(\n\
+           Declaration(Class(:specific_kinase))\n\
+           Declaration(Class(:kinase))\n\
+           Declaration(ObjectProperty(:direct_pos_regulates))\n\
+           Declaration(ObjectProperty(:direct_regulates))\n\
+           Declaration(ObjectProperty(:enabled_by_seed))\n\
+           Declaration(ObjectProperty(:enabled_by))\n\
+           Declaration(ObjectProperty(:phosphorylates))\n\
+           SubClassOf(:specific_kinase :kinase)\n\
+           SubObjectPropertyOf(:direct_pos_regulates :direct_regulates)\n\
+           SubObjectPropertyOf(:enabled_by_seed :enabled_by)\n\
+           DLSafeRule(\n\
+             Body(\n\
+               ObjectPropertyAtom(:direct_regulates Variable(<urn:swrl:var#a1>) Variable(<urn:swrl:var#a2>))\n\
+               ClassAtom(:kinase Variable(<urn:swrl:var#a1>))\n\
+               ObjectPropertyAtom(:enabled_by Variable(<urn:swrl:var#a1>) Variable(<urn:swrl:var#g1>))\n\
+               ObjectPropertyAtom(:enabled_by Variable(<urn:swrl:var#a2>) Variable(<urn:swrl:var#g2>))\n\
+             )\n\
+             Head(ObjectPropertyAtom(:phosphorylates Variable(<urn:swrl:var#g1>) Variable(<urn:swrl:var#g2>)))\n\
+           )\n\
+         )",
+    );
+
+    assert!(
+        inferred.contains("<http://example.com/g1> <http://example.com/phosphorylates> <http://example.com/g2_asserted> ."),
+        "SWRL join should see asserted body property matches: {inferred}"
+    );
+    assert!(
+        inferred.contains("<http://example.com/g1> <http://example.com/phosphorylates> <http://example.com/g2_inferred> ."),
+        "SWRL join should see inferred body property matches: {inferred}"
+    );
+}
+
+#[test]
 fn swrl_multi_atom_join_missing_class() {
     // C(?x) ∧ P(?x,?y) → D(?y) — alice is NOT C, so no inference
     let inferred = reason(
@@ -4603,6 +4650,82 @@ fn swrl_constant_in_head() {
     assert!(
         inferred.contains("<http://example.com/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/D> ."),
         "SWRL with property trigger and class head should fire: {inferred}"
+    );
+}
+
+#[test]
+fn swrl_go_direct_regulation_rule_fires() {
+    // GO-CAM "infer input from direct reg" SWRL rule, authored in RDF/XML and
+    // converted to OWL Functional Syntax with `robot convert`. horned-owl lowers
+    // SWRL rules from functional syntax (but not yet from RDF — see the parser).
+    let temp_dir = tempfile::TempDir::new().expect("should create temp dir");
+    let data = temp_dir.path().join("data.nt");
+    let ontology = temp_dir.path().join("ontology.ofn");
+    let output = temp_dir.path().join("inferred.nt");
+
+    write(
+        &data,
+        "\
+<http://model.geneontology.org/531a636500000001/531a63650000004> <http://purl.obolibrary.org/obo/RO_0002629> <http://model.geneontology.org/531a636500000001/531a63650000002> .
+<http://model.geneontology.org/531a636500000001/531a63650000002> <http://purl.obolibrary.org/obo/RO_0002333> <http://purl.obolibrary.org/obo/#531a636500000001%2F5595c4cb00000110> .
+<http://model.geneontology.org/531a636500000001/531a63650000004> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://purl.obolibrary.org/obo/GO_0048018> .
+<http://model.geneontology.org/531a636500000001/531a63650000002> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://purl.obolibrary.org/obo/GO_0004888> .
+",
+    );
+    write(
+        &ontology,
+        "\
+Prefix(rdfs:=<http://www.w3.org/2000/01/rdf-schema#>)
+Prefix(swrla:=<http://swrl.stanford.edu/ontologies/3.3/swrla.owl#>)
+Ontology(
+  Declaration(Class(<http://purl.obolibrary.org/obo/GO_0003674>))
+  Declaration(Class(<http://purl.obolibrary.org/obo/GO_0004888>))
+  Declaration(Class(<http://purl.obolibrary.org/obo/GO_0048018>))
+  Declaration(ObjectProperty(<http://purl.obolibrary.org/obo/LEGOREL_0000000>))
+  Declaration(ObjectProperty(<http://purl.obolibrary.org/obo/RO_0002233>))
+  Declaration(ObjectProperty(<http://purl.obolibrary.org/obo/RO_0002327>))
+  Declaration(ObjectProperty(<http://purl.obolibrary.org/obo/RO_0002333>))
+  Declaration(ObjectProperty(<http://purl.obolibrary.org/obo/RO_0002578>))
+  Declaration(ObjectProperty(<http://purl.obolibrary.org/obo/RO_0002629>))
+  SubObjectPropertyOf(<http://purl.obolibrary.org/obo/RO_0002233> <http://purl.obolibrary.org/obo/LEGOREL_0000000>)
+  InverseObjectProperties(<http://purl.obolibrary.org/obo/RO_0002327> <http://purl.obolibrary.org/obo/RO_0002333>)
+  SubObjectPropertyOf(<http://purl.obolibrary.org/obo/RO_0002629> <http://purl.obolibrary.org/obo/RO_0002578>)
+  SubClassOf(<http://purl.obolibrary.org/obo/GO_0004888> <http://purl.obolibrary.org/obo/GO_0003674>)
+  SubClassOf(<http://purl.obolibrary.org/obo/GO_0048018> <http://purl.obolibrary.org/obo/GO_0003674>)
+  DLSafeRule(
+    Annotation(rdfs:comment \"MF(X)-directly_regulates->MF(Y)-enabled_by->GP(Z) => MF(X)-has_input->GP(Z)\")
+    Annotation(rdfs:label \"infer input from direct reg\")
+    Body(
+      ObjectPropertyAtom(<http://purl.obolibrary.org/obo/RO_0002327> Variable(<http://purl.obolibrary.org/obo/ro.owl#z>) Variable(<http://purl.obolibrary.org/obo/ro.owl#y>))
+      ObjectPropertyAtom(<http://purl.obolibrary.org/obo/RO_0002578> Variable(<http://purl.obolibrary.org/obo/ro.owl#x>) Variable(<http://purl.obolibrary.org/obo/ro.owl#y>))
+      ClassAtom(<http://purl.obolibrary.org/obo/GO_0003674> Variable(<http://purl.obolibrary.org/obo/ro.owl#x>))
+      ClassAtom(<http://purl.obolibrary.org/obo/GO_0003674> Variable(<http://purl.obolibrary.org/obo/ro.owl#y>))
+    )
+    Head(ObjectPropertyAtom(<http://purl.obolibrary.org/obo/RO_0002233> Variable(<http://purl.obolibrary.org/obo/ro.owl#x>) Variable(<http://purl.obolibrary.org/obo/ro.owl#z>)))
+  )
+)
+",
+    );
+
+    strix::run([
+        "strix",
+        "reason",
+        data.to_str().expect("data path should be UTF-8"),
+        "--ontology",
+        ontology.to_str().expect("ontology path should be UTF-8"),
+        "--output",
+        output.to_str().expect("output path should be UTF-8"),
+    ])
+    .expect("reasoning run should succeed");
+
+    let inferred = fs::read_to_string(&output).expect("output should exist");
+    assert!(
+        inferred.contains("<http://model.geneontology.org/531a636500000001/531a63650000004> <http://purl.obolibrary.org/obo/RO_0002233> <http://purl.obolibrary.org/obo/#531a636500000001%2F5595c4cb00000110> ."),
+        "GO direct-regulation SWRL rule should infer has_input: {inferred}"
+    );
+    assert!(
+        inferred.contains("<http://model.geneontology.org/531a636500000001/531a63650000004> <http://purl.obolibrary.org/obo/LEGOREL_0000000> <http://purl.obolibrary.org/obo/#531a636500000001%2F5595c4cb00000110> ."),
+        "has_input subproperty closure should infer LEGOREL: {inferred}"
     );
 }
 

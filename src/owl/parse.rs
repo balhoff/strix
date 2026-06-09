@@ -613,8 +613,8 @@ fn absorb_ontology(
                 if let Ok(from) = encode_individual(&axiom.from, dictionary) {
                     let prop = dictionary.encode_iri(axiom.dp.as_ref());
                     let rdf_literal = encode_horned_literal(&axiom.to);
-                    let dt_id = literal_datatype_iri(&rdf_literal)
-                        .map(|iri| dictionary.encode_iri(iri));
+                    let dt_id =
+                        literal_datatype_iri(&rdf_literal).map(|iri| dictionary.encode_iri(iri));
                     let value = dictionary.encode(rdf_literal);
                     if let Some(dt_id) = dt_id {
                         schema.literal_datatype_types.push((value, dt_id));
@@ -1042,10 +1042,18 @@ fn format_ce(ce: &ClassExpression<RcStr>) -> String {
     match ce {
         ClassExpression::Class(c) => format!("<{}>", c.as_ref()),
         ClassExpression::ObjectSomeValuesFrom { ope, bce } => {
-            format!("ObjectSomeValuesFrom({} {})", format_ope(ope), format_ce(bce))
+            format!(
+                "ObjectSomeValuesFrom({} {})",
+                format_ope(ope),
+                format_ce(bce)
+            )
         }
         ClassExpression::ObjectAllValuesFrom { ope, bce } => {
-            format!("ObjectAllValuesFrom({} {})", format_ope(ope), format_ce(bce))
+            format!(
+                "ObjectAllValuesFrom({} {})",
+                format_ope(ope),
+                format_ce(bce)
+            )
         }
         ClassExpression::ObjectIntersectionOf(ces) => {
             let parts: Vec<String> = ces.iter().map(format_ce).collect();
@@ -1059,7 +1067,11 @@ fn format_ce(ce: &ClassExpression<RcStr>) -> String {
             format!("ObjectComplementOf({})", format_ce(bce))
         }
         ClassExpression::ObjectHasValue { ope, i } => {
-            format!("ObjectHasValue({} {})", format_ope(ope), format_individual(i))
+            format!(
+                "ObjectHasValue({} {})",
+                format_ope(ope),
+                format_individual(i)
+            )
         }
         ClassExpression::ObjectOneOf(inds) => {
             let parts: Vec<String> = inds.iter().map(format_individual).collect();
@@ -1069,31 +1081,63 @@ fn format_ce(ce: &ClassExpression<RcStr>) -> String {
             format!("ObjectHasSelf({})", format_ope(ope))
         }
         ClassExpression::ObjectMinCardinality { n, ope, bce } => {
-            format!("ObjectMinCardinality({n} {} {})", format_ope(ope), format_ce(bce))
+            format!(
+                "ObjectMinCardinality({n} {} {})",
+                format_ope(ope),
+                format_ce(bce)
+            )
         }
         ClassExpression::ObjectMaxCardinality { n, ope, bce } => {
-            format!("ObjectMaxCardinality({n} {} {})", format_ope(ope), format_ce(bce))
+            format!(
+                "ObjectMaxCardinality({n} {} {})",
+                format_ope(ope),
+                format_ce(bce)
+            )
         }
         ClassExpression::ObjectExactCardinality { n, ope, bce } => {
-            format!("ObjectExactCardinality({n} {} {})", format_ope(ope), format_ce(bce))
+            format!(
+                "ObjectExactCardinality({n} {} {})",
+                format_ope(ope),
+                format_ce(bce)
+            )
         }
         ClassExpression::DataSomeValuesFrom { dp, dr } => {
-            format!("DataSomeValuesFrom(<{}> {})", dp.as_ref(), format_data_range(dr))
+            format!(
+                "DataSomeValuesFrom(<{}> {})",
+                dp.as_ref(),
+                format_data_range(dr)
+            )
         }
         ClassExpression::DataAllValuesFrom { dp, dr } => {
-            format!("DataAllValuesFrom(<{}> {})", dp.as_ref(), format_data_range(dr))
+            format!(
+                "DataAllValuesFrom(<{}> {})",
+                dp.as_ref(),
+                format_data_range(dr)
+            )
         }
         ClassExpression::DataHasValue { dp, l } => {
             format!("DataHasValue(<{}> {:?})", dp.as_ref(), l)
         }
         ClassExpression::DataMinCardinality { n, dp, dr } => {
-            format!("DataMinCardinality({n} <{}> {})", dp.as_ref(), format_data_range(dr))
+            format!(
+                "DataMinCardinality({n} <{}> {})",
+                dp.as_ref(),
+                format_data_range(dr)
+            )
         }
         ClassExpression::DataMaxCardinality { n, dp, dr } => {
-            format!("DataMaxCardinality({n} <{}> {})", dp.as_ref(), format_data_range(dr))
+            format!(
+                "DataMaxCardinality({n} <{}> {})",
+                dp.as_ref(),
+                format_data_range(dr)
+            )
         }
         ClassExpression::DataExactCardinality { n, dp, dr } => {
-            format!("DataExactCardinality({n} <{}> {})", dp.as_ref(), format_data_range(dr))
+            format!(
+                "DataExactCardinality({n} <{}> {})",
+                dp.as_ref(),
+                format_data_range(dr)
+            )
         }
     }
 }
@@ -1157,9 +1201,7 @@ fn encode_data_range(
             }
             let proxy = fresh_proxy_term(schema, dictionary);
             schema.intersection_of.push((proxy, range_ids));
-            schema
-                .proxy_display
-                .insert(proxy, format_data_range(dr));
+            schema.proxy_display.insert(proxy, format_data_range(dr));
             schema.data_range_cache.insert(dr.clone(), proxy);
             Some(proxy)
         }
@@ -1203,15 +1245,13 @@ fn literal_datatype_iri(term: &RdfTerm) -> Option<&str> {
 fn is_useful_sub_ce(ce: &ClassExpression<RcStr>) -> bool {
     match ce {
         ClassExpression::Class(_) => true,
-        ClassExpression::ObjectIntersectionOf(conjuncts) => {
-            conjuncts.iter().all(is_useful_sub_ce)
-        }
+        ClassExpression::ObjectIntersectionOf(conjuncts) => conjuncts.iter().all(is_useful_sub_ce),
         ClassExpression::ObjectUnionOf(disjuncts) => disjuncts.iter().any(is_useful_sub_ce),
         ClassExpression::ObjectSomeValuesFrom { bce, .. } => is_useful_sub_ce(bce),
         ClassExpression::ObjectHasValue { i, .. } => matches!(i, Individual::Named(_)),
-        ClassExpression::ObjectOneOf(individuals) => {
-            individuals.iter().any(|i| matches!(i, Individual::Named(_)))
-        }
+        ClassExpression::ObjectOneOf(individuals) => individuals
+            .iter()
+            .any(|i| matches!(i, Individual::Named(_))),
         ClassExpression::DataSomeValuesFrom { dr, .. } => is_useful_data_range(dr),
         ClassExpression::DataHasValue { .. } => true,
         _ => false,
@@ -1229,9 +1269,7 @@ fn is_useful_super_ce(ce: &ClassExpression<RcStr>) -> bool {
         }
         ClassExpression::ObjectAllValuesFrom { bce, .. } => is_useful_super_ce(bce),
         ClassExpression::ObjectHasValue { i, .. } => matches!(i, Individual::Named(_)),
-        ClassExpression::ObjectMaxCardinality { n, bce, .. } => {
-            *n <= 1 && is_useful_sub_ce(bce)
-        }
+        ClassExpression::ObjectMaxCardinality { n, bce, .. } => *n <= 1 && is_useful_sub_ce(bce),
         ClassExpression::ObjectComplementOf(bce) => is_useful_sub_ce(bce),
         ClassExpression::DataAllValuesFrom { dr, .. } => is_useful_data_range(dr),
         ClassExpression::DataHasValue { .. } => true,

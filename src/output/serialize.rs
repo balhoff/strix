@@ -50,7 +50,8 @@ pub fn write_ntriples(
                 if is_proxy_prop(subject, predicate, object) {
                     continue;
                 }
-                if let Some(line) = format_property_triple(dictionary, subject, predicate, object)? {
+                if let Some(line) = format_property_triple(dictionary, subject, predicate, object)?
+                {
                     writeln!(writer, "{line}")?;
                     written += 1;
                 }
@@ -72,7 +73,8 @@ pub fn write_ntriples(
                 if is_proxy_prop(subject, predicate, object) {
                     continue;
                 }
-                if let Some(line) = format_property_triple(dictionary, subject, predicate, object)? {
+                if let Some(line) = format_property_triple(dictionary, subject, predicate, object)?
+                {
                     writeln!(writer, "{line}")?;
                     written += 1;
                 }
@@ -87,7 +89,11 @@ pub fn write_ntriples(
 /// Format a type triple, returning `None` if the subject is a literal
 /// (literal-as-subject type assertions are internal bookkeeping for data
 /// range restrictions and must not appear in output).
-fn format_type_triple(dictionary: &Dictionary, instance: u64, class: u64) -> Result<Option<String>> {
+fn format_type_triple(
+    dictionary: &Dictionary,
+    instance: u64,
+    class: u64,
+) -> Result<Option<String>> {
     let subject = decode_term(dictionary, instance, "subject")?;
     if matches!(subject, Term::Literal(_)) {
         return Ok(None);

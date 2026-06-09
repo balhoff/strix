@@ -19,10 +19,7 @@ pub fn write_binary_segment(path: &Path, tuples: &[(TermId, TermId)]) -> Result<
 }
 
 /// Write a sorted slice of ternary tuples to a segment file.
-pub fn write_ternary_segment(
-    path: &Path,
-    tuples: &[(TermId, TermId, TermId)],
-) -> Result<Segment> {
+pub fn write_ternary_segment(path: &Path, tuples: &[(TermId, TermId, TermId)]) -> Result<Segment> {
     write_ternary_segment_streaming(path, tuples.iter().copied().map(Ok))
 }
 
